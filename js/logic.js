@@ -13,7 +13,7 @@ export const isDone = (s) => s === 'packed' || s === 'shipped';
 export const DEFAULT_CONFIG = {
   members: [],
   defaultTarget: 30,
-  standardMin: 20, // 1台あたり1人の標準作業時間（分）
+  standardMin: 50, // 1台あたり1人の標準作業時間（分）
   minSamples: 3, // この台数以上完了したら実績ペースを使う
   workStart: '07:00',
   workEnd: '19:00',
@@ -153,7 +153,7 @@ export function forecast({ day, cfg, done, now, date }) {
   const active = activeMembers(day?.att).length;
   const pm = personMinutes(day?.att, now, base, startMin, breaks);
   const useActual = done >= (cfg.minSamples || 3) && pm >= 30; // 稼働30分未満は標準値
-  const perUnit = useActual ? pm / done : Number(cfg.standardMin) || 20; // 人・分 / 台
+  const perUnit = useActual ? pm / done : Number(cfg.standardMin) || 50; // 人・分 / 台
   const r = { goal, done, remaining, active, personMin: pm, perUnit, source: useActual ? 'actual' : 'standard', endMs, limitMs };
   r.pacePerHour = active ? (60 * active) / perUnit : 0;
   if (!remaining) return { ...r, state: 'achieved' };
