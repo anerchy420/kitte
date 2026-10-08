@@ -1,0 +1,11 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // パスコードから作った64桁のIDを知っている端末だけが読み書きできる。
+    // teams コレクション自体の一覧取得は許可しないので、IDを推測されない限り他人は触れない。
+    match /teams/{teamId}/{coll}/{docId} {
+      allow read, write: if teamId.size() == 64
+        && coll in ['units', 'days', 'logs', 'meta'];
+    }
+  }
+}
