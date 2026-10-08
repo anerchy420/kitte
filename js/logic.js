@@ -369,14 +369,43 @@ export function planImport(records, units, cfg, opts) {
   return out;
 }
 
-export function buildImportUpdates(plan, now, me) {
+export function buildImportUpdates(plan, now, me, importId) {
   const ups = {};
   for (const it of plan) {
     if (it.action === 'error' || it.action === 'dup' || it.action === 'same' || it.action === 'conflict') continue;
     const base = it.action === 'new' ? { pc: it.pc, yrl: '', slip: '', worker: '', status: 'todo', packedDate: null, note: '', createdAt: now } : {};
     ups[it.pc] = { ...base, ...it.changes, updatedAt: now, updatedBy: me };
+    if (importId) ups[it.pc].importId = importId;
   }
   return ups;
+}
+
+// 表での一括編集の差分 → 更新内容。edits = { pc: { yrl, slip, worker, status, packedDate, note } }（変えた項目だけ）
+export const EDIT_FIELDS = ['yrl', 'slip', 'worker', 'status', 'packedDate', 'note'];
+export function buildEditUpdates(edits, units, today, now, me) {
+  const ups = {};
+  const logs = [];
+  for (const [pc, e] of Object.entries(edits)) {
+    const cur = units[pc];
+    if (!cur) continue;
+    const ch = {};
+    for (const k of ['yrl', 'slip', 'worker', 'note']) {
+      if (k in e && (cur[k] || '') !== (e[k] || '')) ch[k] = e[k] || '';
+    }
+    if (e.status && e.status !== cur.status) {
+      const w = 'worker' in ch ? ch.worker : cur.worker || me;
+      Object.assign(ch, { status: e.status }, statusSideEffects(cur, e.status, e.packedDate || today, w));
+      if ('worker' in e) ch.worker = e.worker || '';
+      logs.push({ pc: Number(pc) || pc, from: cur.status, to: e.status });
+    }
+    const st = ch.status ?? cur.status;
+    if (isDone(st) && e.packedDate && e.packedDate !== (ch.packedDate ?? cur.packedDate)) {
+      if (!cur.packedDate || cur.packedDate !== e.packedDate) logs.push({ pc: Number(pc) || pc, msg: `PC${pc}の梱包日を${e.packedDate}に変更` });
+      ch.packedDate = e.packedDate;
+    }
+    if (Object.keys(ch).length) ups[pc] = { ...ch, updatedAt: now, updatedBy: me };
+  }
+  return { ups, logs };
 }
 
 // ステータス変更時に一緒に変える項目

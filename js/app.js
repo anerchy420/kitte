@@ -1,8 +1,8 @@
 import {
-  STATUSES, STATUS_LABEL, DEFAULT_CONFIG, YRL_RE, SLIP_RE, isDone, normNum, parsePc,
+  STATUSES, STATUS_LABEL, DEFAULT_CONFIG, YRL_RE, SLIP_RE, isDone, normNum, parsePc, parseStatus,
   dateKey, fmtTime, fmtDur, hm, forecast, doneOn, carryFrom, activeMembers,
   textToTable, guessMapping, looksLikeHeader, rowsToRecords, planImport, buildImportUpdates,
-  statusSideEffects, formatReport, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
+  statusSideEffects, buildEditUpdates, formatReport, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 
@@ -26,7 +26,7 @@ const S = {
   dayLoaded: false,
   log: [],
   tab: 'home',
-  list: { q: '', status: 'all', worker: 'all', sort: 'pc', select: false, selected: new Set(), limit: 200 },
+  list: { q: '', status: 'all', worker: 'all', sort: 'pc', select: false, selected: new Set(), limit: 200, imp: '', pdate: '' },
   io: { src: 'text', text: '', mode: 'auto', open: '≪', close: '≫', delim: 'tab', pattern: '', table: null, headerRow: false, mapping: null, overwrite: false, setStatus: '', date: dateKey(), reportDate: dateKey(), reportWorker: '', sheets: null, wb: null },
   history: null,
   unsubs: [],
@@ -45,7 +45,10 @@ function toast(msg, kind = '') {
 window.addEventListener('store-error', (e) => toast('保存エラー: ' + (e.detail?.message || e.detail), 'err'));
 
 function openSheet(html, mount) {
-  const sh = $('#sheet');
+  // 前回のシートに付けたイベントを残さないよう、要素ごと作り直す
+  const old = $('#sheet');
+  const sh = old.cloneNode(false);
+  old.replaceWith(sh);
   sh.innerHTML = `<div class="sheet-grip"></div>${html}`;
   sh.classList.remove('hidden');
   $('#sheet-backdrop').classList.remove('hidden');
@@ -432,23 +435,25 @@ function onHomeClick(e) {
   if (act === 'goto-list') { S.list.status = b.dataset.status; S.list.worker = 'all'; switchTab('list'); }
 }
 
-function openTargetEditor() {
+function openTargetEditor(date = S.today, day = S.day || {}) {
   openSheet(`
-    <h3>本日の目標（${S.today}）</h3>
-    <label>本日の目標台数<input id="t-target" type="number" inputmode="numeric" value="${S.day.target || 0}"></label>
-    <label>前日からの繰越<input id="t-carry" type="number" inputmode="numeric" value="${S.day.carry || 0}"></label>
-    <p class="muted small">合計目標 = 目標 + 繰越。繰越は前日の未達分から自動計算されます${S.day.carryFrom ? `（${S.day.carryFrom}分）` : ''}。</p>
+    <h3>${date === S.today ? '本日' : esc(date)}の目標（${esc(date)}）</h3>
+    <label>目標台数<input id="t-target" type="number" inputmode="numeric" value="${day.target || 0}"></label>
+    <label>前日からの繰越<input id="t-carry" type="number" inputmode="numeric" value="${day.carry || 0}"></label>
+    <p class="muted small">合計目標 = 目標 + 繰越。繰越は前日の未達分から自動計算されます${day.carryFrom ? `（${day.carryFrom}分）` : ''}。</p>
     <button id="t-recalc" class="btn">繰越を再計算</button>
     <div class="sheet-actions"><button class="btn" data-close>キャンセル</button><button id="t-save" class="btn primary">保存</button></div>`, (sh) => {
     sh.querySelector('[data-close]').onclick = closeSheet;
     $('#t-recalc').onclick = async () => {
       const days = await S.store.listDays();
-      const prev = Object.keys(days).filter((k) => k < S.today).sort().pop();
+      const prev = Object.keys(days).filter((k) => k < date).sort().pop();
       $('#t-carry').value = prev ? carryFrom(days[prev], doneOn(S.units, prev).length) : 0;
       toast(prev ? `${prev}の未達分から計算しました` : '前日のデータがありません');
     };
     $('#t-save').onclick = () => {
-      S.store.setDay(S.today, { target: Math.max(0, Number($('#t-target').value) || 0), carry: Math.max(0, Number($('#t-carry').value) || 0) });
+      const p = { target: Math.max(0, Number($('#t-target').value) || 0), carry: Math.max(0, Number($('#t-carry').value) || 0) };
+      S.store.setDay(date, p);
+      if (S.history) { S.history[date] = { ...(S.history[date] || {}), ...p }; if (S.tab === 'history') renderHistory(); }
       closeSheet();
     };
   });
@@ -518,6 +523,11 @@ function renderListShell() {
         <select id="l-sort"><option value="pc">PC番号順</option><option value="upd">更新が新しい順</option></select>
         <button id="l-select" class="btn ${L.select ? 'on' : ''}">選択</button>
       </div>
+      <select id="l-imp"></select>
+      <div class="row">
+        <label class="pdate-l">梱包日<input id="l-pdate" type="date" value="${esc(L.pdate)}"></label>
+        <button id="l-grid" class="btn">表で編集</button>
+      </div>
     </div>
     <div id="l-bulk" class="bulk hidden"></div>
     <div id="l-body"></div>`;
@@ -528,6 +538,12 @@ function renderListShell() {
   $('#l-sort').addEventListener('change', (e) => { L.sort = e.target.value; renderListBody(); });
   $('#l-select').addEventListener('click', () => { L.select = !L.select; L.selected.clear(); $('#l-select').classList.toggle('on', L.select); renderListBody(); });
   $('#l-add').addEventListener('click', () => openUnit(null));
+  $('#l-imp').addEventListener('change', (e) => { L.imp = e.target.value; renderListBody(); });
+  $('#l-pdate').addEventListener('change', (e) => { L.pdate = e.target.value; renderListBody(); });
+  $('#l-grid').addEventListener('click', () => {
+    const list = L.select && L.selected.size ? filteredUnits().list.filter((u) => L.selected.has(String(u.pc))) : filteredUnits().list;
+    openGrid(list);
+  });
   $('#l-status').addEventListener('click', (e) => {
     const b = e.target.closest('[data-status]');
     if (b) { L.status = b.dataset.status; renderListBody(); }
@@ -544,6 +560,8 @@ function filteredUnits() {
   if (L.worker === 'me') list = list.filter((u) => u.worker === S.me);
   else if (L.worker === 'none') list = list.filter((u) => !u.worker);
   else if (L.worker.startsWith('w:')) list = list.filter((u) => u.worker === L.worker.slice(2));
+  if (L.imp) list = list.filter((u) => u.importId === L.imp);
+  if (L.pdate) list = list.filter((u) => isDone(u.status) && u.packedDate === L.pdate);
   if (q) list = list.filter((u) => [u.pc, u.yrl, u.slip, u.note, u.worker].some((v) => String(v ?? '').toLowerCase().includes(q)));
   const counts = { all: list.length, nosl: list.filter((u) => !u.slip).length };
   for (const s of STATUSES) counts[s.key] = list.filter((u) => u.status === s.key).length;
@@ -557,6 +575,11 @@ function renderListBody() {
   if (!$('#l-body')) return;
   const L = S.list;
   const { list, counts } = filteredUnits();
+  const imps = importBatches();
+  if (L.imp && !imps.some(([id]) => id === L.imp)) imps.unshift([L.imp, 0]);
+  $('#l-imp').innerHTML = `<option value="">取り込み：すべて</option>` + imps.map(([id, n]) => `<option value="${esc(id)}" ${L.imp === id ? 'selected' : ''}>取込 ${esc(id)}（${n}台）</option>`).join('');
+  $('#l-pdate').value = L.pdate;
+  $('#l-grid').textContent = L.select && L.selected.size ? `選択${L.selected.size}台を表で編集` : `表で編集（${list.length}台）`;
   $('#l-status').innerHTML = [['all', 'すべて'], ...STATUSES.map((s) => [s.key, s.label]), ['nosl', '伝票なし']]
     .map(([k, l]) => `<button class="chip ${L.status === k ? 'on' : ''}" data-status="${k}">${l} <b>${counts[k] ?? 0}</b></button>`).join('');
   const body = $('#l-body');
@@ -587,7 +610,19 @@ function renderListBody() {
     bulk.innerHTML = `<span><b>${L.selected.size}</b>台選択</span>
       <button class="btn sm" data-bulk="all">表示中を全選択</button>
       <select id="bulk-status"><option value="">ステータス変更…</option>${STATUSES.map((s) => `<option value="${s.key}">${s.label}</option>`).join('')}</select>
-      <select id="bulk-worker"><option value="">作業者変更…</option>${allWorkers().map((w) => `<option>${esc(w)}</option>`).join('')}<option value="__none">（未割当にする）</option></select>`;
+      <select id="bulk-worker"><option value="">作業者変更…</option>${allWorkers().map((w) => `<option>${esc(w)}</option>`).join('')}<option value="__none">（未割当にする）</option></select>
+      <span class="row bulk-date"><input type="date" id="bulk-date" value="${S.today}"><button class="btn sm" id="bulk-date-go">梱包日を変更</button></span>`;
+    $('#bulk-date-go').onclick = () => {
+      const d = $('#bulk-date').value;
+      if (!d || !L.selected.size) return;
+      const pcs = [...L.selected].filter((pc) => isDone(S.units[pc]?.status));
+      if (!pcs.length) return toast('梱包済み・発送済みのPCが選ばれていません', 'warn');
+      if (!confirm(`${pcs.length}台の梱包日を${d}にしますか？（未完了の${L.selected.size - pcs.length}台は対象外）`)) return;
+      const edits = Object.fromEntries(pcs.map((pc) => [pc, { packedDate: d }]));
+      applyEdits(edits);
+      L.selected.clear();
+      renderListBody();
+    };
     $('#bulk-status').onchange = (e) => {
       if (!e.target.value || !L.selected.size) return;
       if (confirm(`${L.selected.size}台を「${STATUS_LABEL[e.target.value]}」にしますか？`)) { changeStatus([...L.selected], e.target.value); L.selected.clear(); }
@@ -633,6 +668,150 @@ function onBulkClick(e) {
   }
 }
 
+// ================= まとめて編集 =================
+function importBatches() {
+  const m = new Map();
+  for (const u of Object.values(S.units)) if (u.importId) m.set(u.importId, (m.get(u.importId) || 0) + 1);
+  return [...m].sort((a, b) => b[0].localeCompare(a[0]));
+}
+
+function applyEdits(edits) {
+  const { ups, logs } = buildEditUpdates(edits, S.units, S.today, Date.now(), S.me);
+  const n = Object.keys(ups).length;
+  if (!n) { toast('変更はありません'); return 0; }
+  S.store.setUnits(ups);
+  S.store.addLog(S.today, logEntries([...logs.filter((l) => !l.msg || logs.length <= 5), { msg: `${n}台をまとめて編集` }]));
+  toast(`${n}台を更新しました`);
+  return n;
+}
+
+const GRID_COLS = [
+  ['yrl', 'YRL番号'], ['slip', '発送伝票番号'], ['worker', '作業者'], ['status', 'ステータス'], ['packedDate', '梱包日'], ['note', '備考'],
+];
+function gridCell(u, f, workers) {
+  const v = f === 'packedDate' ? (u.packedDate || '') : (u[f] || '');
+  if (f === 'worker') return `<select data-f="worker"><option value="">—</option>${workers.map((w) => `<option ${w === v ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select>`;
+  if (f === 'status') return `<select data-f="status" class="st-${esc(u.status)}">${STATUSES.map((s) => `<option value="${s.key}" ${s.key === u.status ? 'selected' : ''}>${s.label}</option>`).join('')}</select>`;
+  if (f === 'packedDate') return `<input data-f="packedDate" type="date" value="${esc(v)}">`;
+  return `<input data-f="${f}" value="${esc(v)}" ${f === 'slip' ? 'inputmode="numeric"' : ''} autocomplete="off">`;
+}
+
+function openGrid(list) {
+  if (!list.length) return toast('対象のPCがありません', 'warn');
+  const workers = allWorkers();
+  const orig = new Map(list.map((u) => [String(u.pc), u]));
+  openSheet(`
+    <h3>まとめて編集（${list.length}台）</h3>
+    <div class="fill-box">
+      <div class="row wrap">
+        <select id="g-col">${GRID_COLS.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+        <select id="g-mode"><option value="same">全行に同じ値</option><option value="paste">行ごとに貼り付け（上から順）</option><option value="clear">空にする</option></select>
+      </div>
+      <div id="g-val"></div>
+      <button class="btn sm" id="g-fill">表に反映</button>
+      <span class="muted small">※「保存」を押すまで確定しません</span>
+    </div>
+    <div class="table-wrap grid-wrap">
+      <table class="grid"><thead><tr><th>PC</th>${GRID_COLS.map(([, l]) => `<th>${l}</th>`).join('')}</tr></thead>
+      <tbody>${list.map((u) => `<tr data-pc="${esc(u.pc)}"><th>${esc(u.pc)}</th>${GRID_COLS.map(([f]) => `<td>${gridCell(u, f, workers)}</td>`).join('')}</tr>`).join('')}</tbody></table>
+    </div>
+    <p class="muted small">梱包日は「梱包済み/発送済み」の行だけ反映されます。ステータスを梱包済みにして梱包日が空なら本日になります。</p>
+    <div class="sheet-actions"><span id="g-count" class="muted small grow">変更 0台</span><button class="btn" data-close>閉じる</button><button class="btn primary" id="g-save">保存</button></div>`, (sh) => {
+    const tbody = sh.querySelector('tbody');
+    const valBox = $('#g-val');
+    const renderVal = () => {
+      const col = $('#g-col').value;
+      const mode = $('#g-mode').value;
+      if (mode === 'clear') { valBox.innerHTML = ''; return; }
+      if (mode === 'paste') { valBox.innerHTML = `<textarea id="g-v" rows="4" placeholder="1行に1つずつ。表の上の行から順に入ります"></textarea>`; return; }
+      if (col === 'worker') valBox.innerHTML = `<select id="g-v"><option value="">（未割当）</option>${workers.map((w) => `<option>${esc(w)}</option>`).join('')}</select>`;
+      else if (col === 'status') valBox.innerHTML = `<select id="g-v">${STATUSES.map((s) => `<option value="${s.key}">${s.label}</option>`).join('')}</select>`;
+      else if (col === 'packedDate') valBox.innerHTML = `<input id="g-v" type="date" value="${S.today}">`;
+      else valBox.innerHTML = `<input id="g-v" autocomplete="off">`;
+    };
+    renderVal();
+    $('#g-col').onchange = renderVal;
+    $('#g-mode').onchange = renderVal;
+
+    const collect = () => {
+      const edits = {};
+      tbody.querySelectorAll('tr').forEach((tr) => {
+        const u = orig.get(tr.dataset.pc);
+        const e = {};
+        tr.querySelectorAll('[data-f]').forEach((el) => {
+          const f = el.dataset.f;
+          let v = el.value.trim();
+          if (f === 'yrl' || f === 'slip') v = normNum(v);
+          const ov = f === 'status' ? u.status : (u[f] || '');
+          const changed = v !== ov;
+          el.closest('td').classList.toggle('chg', changed);
+          if (changed) e[f] = v;
+        });
+        if (Object.keys(e).length) {
+          if (e.packedDate === undefined && tr.querySelector('[data-f=packedDate]').value) e.packedDate = tr.querySelector('[data-f=packedDate]').value;
+          edits[tr.dataset.pc] = e;
+        }
+      });
+      $('#g-count').textContent = `変更 ${Object.keys(edits).length}台`;
+      return edits;
+    };
+    tbody.addEventListener('input', collect);
+    tbody.addEventListener('change', collect);
+
+    $('#g-fill').onclick = () => {
+      const col = $('#g-col').value;
+      const mode = $('#g-mode').value;
+      const els = [...tbody.querySelectorAll(`[data-f=${col}]`)];
+      let vals;
+      if (mode === 'clear') vals = els.map(() => '');
+      else if (mode === 'paste') {
+        vals = ($('#g-v').value || '').split(/\r?\n/).map((x) => x.trim()).filter((x, i, a) => x || i < a.length - 1);
+        if (!vals.length) return toast('貼り付ける値を入力してください', 'warn');
+        if (vals.length !== els.length) toast(`${vals.length}行を上から反映します（表は${els.length}行）`, 'warn');
+      } else vals = els.map(() => $('#g-v').value);
+      els.forEach((el, i) => {
+        if (i >= vals.length) return;
+        let v = vals[i];
+        if (col === 'status') {
+          if (mode === 'clear') return;
+          v = STATUSES.some((s) => s.key === v) ? v : parseStatus(v) || el.value;
+        }
+        if (col === 'packedDate') v = normNum(v).replace(/\//g, '-');
+        if (col === 'yrl' || col === 'slip') v = normNum(v);
+        if (col === 'worker' && v && !workers.includes(v)) {
+          el.insertAdjacentHTML('beforeend', `<option>${esc(v)}</option>`);
+        }
+        el.value = v;
+      });
+      collect();
+    };
+
+    sh.querySelector('[data-close]').onclick = () => {
+      if (Object.keys(collect()).length && !confirm('保存していない変更があります。閉じますか？')) return;
+      closeSheet();
+    };
+    $('#g-save').onclick = () => {
+      const edits = collect();
+      const n = Object.keys(edits).length;
+      if (!n) return toast('変更はありません');
+      const bad = Object.entries(edits).filter(([, e]) => (e.yrl && !YRL_RE.test(e.yrl)) || (e.slip && !SLIP_RE.test(e.slip)));
+      if (!confirm(`${n}台の変更を保存しますか？${bad.length ? `\n（形式が違う番号が${bad.length}台あります）` : ''}`)) return;
+      applyEdits(edits);
+      closeSheet();
+    };
+  });
+}
+
+function showListWith(filter) {
+  Object.assign(S.list, { q: '', status: 'all', worker: 'all', imp: '', pdate: '', select: false, limit: 200 }, filter);
+  S.list.selected.clear();
+  switchTab('list');
+}
+function openImportBatch(id, grid) {
+  showListWith({ imp: id });
+  if (grid) openGrid(filteredUnits().list);
+}
+
 // ================= 1台の編集 =================
 function openUnit(pc) {
   const isNew = pc == null || !S.units[pc];
@@ -648,6 +827,7 @@ function openUnit(pc) {
     <label>作業者<select id="u-worker"><option value="">（未割当）</option>${workers.map((w) => `<option ${w === u.worker ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select></label>
     <div class="lbl">ステータス</div>
     <div class="seg" id="u-status">${STATUSES.map((s) => `<button type="button" class="st-${s.key} ${s.key === u.status ? 'on' : ''}" data-s="${s.key}">${s.label}</button>`).join('')}</div>
+    <label id="u-pdate-l" class="${isDone(u.status) ? '' : 'hidden'}">梱包日（実績の日付）<input id="u-pdate" type="date" value="${esc(u.packedDate || S.today)}"></label>
     <label>備考<textarea id="u-note" rows="2">${esc(u.note)}</textarea></label>
     ${!isNew ? `<p class="muted small">${u.packedDate ? `梱包日 ${esc(u.packedDate)}　` : ''}${u.updatedAt ? `最終更新 ${dateKey(u.updatedAt)} ${fmtTime(u.updatedAt)} ${esc(u.updatedBy || '')}` : ''}</p>` : ''}
     <div class="sheet-actions">
@@ -663,6 +843,7 @@ function openUnit(pc) {
       status = b.dataset.s;
       $('#u-status').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
       if (status !== 'todo' && !$('#u-worker').value && S.me) $('#u-worker').value = S.me;
+      $('#u-pdate-l').classList.toggle('hidden', !isDone(status));
     });
     const check = () => {
       const w = [];
@@ -696,13 +877,17 @@ function openUnit(pc) {
       if (status === 'shipped' && !next.slip && cur?.status !== 'shipped' && !confirm('伝票番号が未入力です。発送済みにしますか？')) return;
       const ch = {};
       for (const [k, v] of Object.entries(next)) if ((cur?.[k] || '') !== v) ch[k] = v;
-      if (!cur || cur.status !== status) Object.assign(ch, { status }, statusSideEffects(cur, status, S.today, ch.worker ?? cur?.worker ?? S.me));
+      const pdate = $('#u-pdate').value || S.today;
+      if (!cur || cur.status !== status) Object.assign(ch, { status }, statusSideEffects(cur, status, pdate, ch.worker ?? cur?.worker ?? S.me));
       if (ch.worker === undefined && !cur && status !== 'todo') ch.worker = next.worker;
+      let dateMoved = false;
+      if (isDone(status) && pdate !== (ch.packedDate ?? cur?.packedDate)) { ch.packedDate = pdate; dateMoved = !!cur?.packedDate; }
       if (!Object.keys(ch).length) { closeSheet(); return; }
       const base = cur ? {} : { pc: p, yrl: '', slip: '', worker: '', status: 'todo', packedDate: null, note: '', createdAt: now };
       S.store.setUnits({ [p]: { ...base, ...ch, updatedAt: now, updatedBy: S.me } });
       if (cur && ch.status) S.store.addLog(S.today, logEntries([{ pc: p, from: cur.status, to: status }]));
       if (!cur) S.store.addLog(S.today, logEntries([{ pc: p, msg: `PC${p}を追加` }]));
+      if (dateMoved) S.store.addLog(S.today, logEntries([{ pc: p, msg: `PC${p}の梱包日を${pdate}に変更` }]));
       closeSheet();
       toast(`PC${p}を保存しました`);
     };
@@ -753,6 +938,8 @@ function renderIO() {
         ${io.sheets && io.sheets.length > 1 ? `<label>シート<select id="io-sheet">${io.sheets.map((s) => `<option ${s === io.sheet ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label>` : ''}
         <p class="muted small">Excel (.xlsx/.xls) と CSV（UTF-8 / Shift_JIS）に対応。</p>
       `}
+      ${io.lastImport ? `<div class="after-imp">✅ ${io.lastImport.n}件を取り込みました（${esc(io.lastImport.id)}）
+        <div class="row wrap"><button class="btn sm primary" data-imp-grid>この${io.lastImport.n}件を表で一括編集</button><button class="btn sm" data-imp-list>一覧で見る</button></div></div>` : ''}
       <div id="io-map"></div>
       <div id="io-plan"></div>
     </div>
@@ -786,6 +973,8 @@ function renderIO() {
   $('#io-modeopt')?.addEventListener('input', (e) => { if (e.target.dataset.k) io[e.target.dataset.k] = e.target.value; });
   $('#io-modeopt')?.addEventListener('change', (e) => { if (e.target.dataset.k) io[e.target.dataset.k] = e.target.value; });
   $('#io-parse')?.addEventListener('click', parseText);
+  root.querySelector('[data-imp-grid]')?.addEventListener('click', () => openImportBatch(io.lastImport.id, true));
+  root.querySelector('[data-imp-list]')?.addEventListener('click', () => openImportBatch(io.lastImport.id, false));
   $('#io-file')?.addEventListener('change', (e) => readFile(e.target.files[0]));
   $('#io-sheet')?.addEventListener('change', (e) => { io.sheet = e.target.value; loadSheet(); });
 
@@ -981,15 +1170,17 @@ function renderPlan() {
   $('#io-apply').onclick = () => {
     const now = Date.now();
     const p2 = computePlan();
-    const ups = buildImportUpdates(p2, now, S.me);
+    const importId = `${dateKey(now).slice(5).replace('-', '/')} ${fmtTime(now)} ${S.me}`;
+    const ups = buildImportUpdates(p2, now, S.me, importId);
     const n = Object.keys(ups).length;
     if (!n) return;
     if (!confirm(`${n}件を取り込みます。よろしいですか？`)) return;
     S.store.setUnits(ups);
-    S.store.addLog(S.today, logEntries([{ msg: `${n}件を取り込み` }]));
+    S.store.addLog(S.today, logEntries([{ msg: `${n}件を取り込み（${importId}）` }]));
     toast(`${n}件を取り込みました`);
     io.table = null;
     io.text = '';
+    io.lastImport = { id: importId, n };
     renderIO();
   };
 }
@@ -1141,9 +1332,20 @@ function renderHistory() {
         <div class="card-h"><h2>${esc(d.date)}</h2>${d.goal ? (d.done >= d.goal ? '<span class="badge st-packed">達成</span>' : `<span class="badge st-hold">未達 ${d.goal - d.done}台</span>`) : ''}</div>
         <div class="day-stats"><span>完了 <b>${d.done}</b></span><span>目標 <b>${d.goal}</b>${d.carry ? `<small>(繰越${d.carry})</small>` : ''}</span></div>
         <div class="muted small">${Object.entries(d.byWorker).map(([w, c]) => `${esc(w)} ${c}台`).join('　') || '実績なし'}</div>
-        ${d.done ? `<button class="btn sm" data-report="${esc(d.date)}">報告文</button>` : ''}
+        <div class="row wrap day-btns">
+          ${d.done ? `<button class="btn sm" data-report="${esc(d.date)}">報告文</button><button class="btn sm" data-dgrid="${esc(d.date)}">実績を編集</button>` : ''}
+          <button class="btn sm" data-dtarget="${esc(d.date)}">目標を編集</button>
+        </div>
       </div>`).join('') || '<div class="card"><p class="muted">まだ履歴はありません</p></div>'}`;
   $('#h-reload').onclick = loadHistory;
+  $('#tab-history').querySelectorAll('[data-dgrid]').forEach((b) => (b.onclick = () => {
+    showListWith({ pdate: b.dataset.dgrid });
+    openGrid(filteredUnits().list);
+  }));
+  $('#tab-history').querySelectorAll('[data-dtarget]').forEach((b) => (b.onclick = () => {
+    const d = b.dataset.dtarget;
+    openTargetEditor(d, d === S.today ? S.day || {} : S.history?.[d] || {});
+  }));
   $('#tab-history').querySelectorAll('[data-report]').forEach((b) => {
     b.onclick = () => {
       const text = formatReport(S.units, b.dataset.report, S.cfg);

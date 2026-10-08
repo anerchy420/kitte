@@ -163,3 +163,33 @@ test('書き出し：未完了を含む全件・条件・列・シート分け',
   assert.deepEqual(sheets.map((g) => g.name), ['未着手', '作業中', '梱包済み', '発送済み', '保留・不具合']);
   assert.deepEqual(splitForExport(filterForExport(units, {}), 'worker').map((g) => g.name), ['未割当', '佐藤', '山田']);
 });
+
+test('まとめて編集：差分・梱包日の後編集・ステータス変更', async () => {
+  const { buildEditUpdates, buildImportUpdates } = await import('../js/logic.js');
+  const units = {
+    271: { pc: 271, yrl: 'A', slip: '', worker: '遠藤', status: 'packed', packedDate: '2026-10-08' },
+    272: { pc: 272, yrl: 'B', slip: '', worker: '', status: 'todo', packedDate: null },
+    273: { pc: 273, yrl: 'C', slip: '', worker: '神谷', status: 'wip', packedDate: null },
+  };
+  const { ups, logs } = buildEditUpdates({
+    271: { packedDate: '2026-10-07', slip: '3912-1418-9100' }, // 実績日の修正
+    272: { status: 'packed', worker: '福山', packedDate: '2026-10-06' }, // 過去日付で梱包済み
+    273: { yrl: 'C' }, // 変化なし
+  }, units, '2026-10-09', 5, '根本');
+  assert.equal(ups[271].packedDate, '2026-10-07');
+  assert.equal(ups[271].slip, '3912-1418-9100');
+  assert.equal(ups[272].status, 'packed');
+  assert.equal(ups[272].packedDate, '2026-10-06');
+  assert.equal(ups[272].worker, '福山');
+  assert.equal(ups[273], undefined);
+  assert.ok(logs.some((l) => l.pc === 271 && l.msg));
+  assert.ok(logs.some((l) => l.pc === 272 && l.to === 'packed'));
+  // 未完了の行に梱包日を入れても無視、梱包済み→作業中で梱包日クリア
+  const r2 = buildEditUpdates({ 273: { packedDate: '2026-10-01' }, 271: { status: 'wip' } }, units, 'T', 1, 'x');
+  assert.equal(r2.ups[273], undefined);
+  assert.equal(r2.ups[271].packedDate, null);
+  // 取り込みID
+  const ups3 = buildImportUpdates([{ action: 'new', pc: 300, changes: { yrl: 'Y' } }, { action: 'update', pc: 271, changes: { slip: 'S' } }], 1, 'me', '10/09 07:00 me');
+  assert.equal(ups3[300].importId, '10/09 07:00 me');
+  assert.equal(ups3[271].importId, '10/09 07:00 me');
+});

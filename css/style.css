@@ -175,7 +175,7 @@ nav.bottom button.active { color: var(--primary); font-weight: 700; }
 .badge { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 99px; color: var(--c); background: color-mix(in srgb, var(--c) 14%, transparent); }
 
 /* 一覧 */
-.list-controls { position: sticky; top: 49px; z-index: 5; background: var(--bg); padding: 4px 0 8px; display: flex; flex-direction: column; gap: 8px; }
+.list-controls { padding: 4px 0 8px; display: flex; flex-direction: column; gap: 8px; }
 .chips { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
 .chips.static { flex-wrap: wrap; overflow: visible; }
 .chip { border: 1px solid var(--line); background: var(--card); border-radius: 99px; padding: 6px 12px; font-size: 13px; white-space: nowrap; cursor: pointer; }
@@ -257,3 +257,26 @@ details.preview summary { cursor: pointer; color: var(--primary); }
 .ex-sum { margin: 8px 0; }
 #ex-box details { margin: 8px 0 12px; }
 #ex-box summary { cursor: pointer; color: var(--primary); font-weight: 600; padding: 4px 0; }
+
+/* まとめて編集 */
+.sheet:has(.grid) { max-width: 1100px; }
+.fill-box { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 8px; }
+.fill-box select, .fill-box input, .fill-box textarea { background: var(--card); }
+.fill-box .row > select { flex: 1; min-width: 140px; }
+.grid-wrap { max-height: 55vh; }
+table.grid th, table.grid td { padding: 3px; }
+table.grid tbody th { position: sticky; left: 0; background: var(--card); z-index: 1; font-size: 15px; padding: 0 8px; }
+table.grid thead th { z-index: 2; }
+table.grid input, table.grid select { padding: 6px 8px; font-size: 14px; border-radius: 6px; min-width: 90px; background: var(--card); }
+table.grid input[data-f=yrl] { min-width: 115px; }
+table.grid input[data-f=slip] { min-width: 150px; }
+table.grid input[data-f=note] { min-width: 160px; }
+table.grid td.chg input, table.grid td.chg select { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--card)); }
+.after-imp { background: color-mix(in srgb, var(--ok) 12%, transparent); border-radius: 10px; padding: 10px; margin: 10px 0; font-size: 14px; }
+.after-imp .row { margin-top: 8px; }
+.bulk-date { flex: 1 1 100%; }
+.bulk-date input { flex: 1; padding: 6px 8px; }
+.day-btns { margin-top: 8px; }
+.card.day .day-btns .btn { margin-top: 0; }
+.pdate-l { display: flex; align-items: center; gap: 6px; margin: 0; flex: 1; min-width: 0; white-space: nowrap; }
+.pdate-l input { margin: 0; flex: 1; min-width: 0; }
