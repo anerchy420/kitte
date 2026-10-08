@@ -11,7 +11,7 @@ export const STATUS_LABEL = Object.fromEntries(STATUSES.map((s) => [s.key, s.lab
 export const isDone = (s) => s === 'packed' || s === 'shipped';
 
 export const DEFAULT_CONFIG = {
-  members: [],
+  members: ['遠藤', '神谷', '福山', '根本', '橋本'],
   defaultTarget: 30,
   standardMin: 50, // 1台あたり1人の標準作業時間（分）
   minSamples: 3, // この台数以上完了したら実績ペースを使う
