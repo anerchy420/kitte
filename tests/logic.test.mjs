@@ -4,6 +4,7 @@ import {
   DEFAULT_CONFIG, textToTable, guessMapping, rowsToRecords, planImport, buildImportUpdates,
   formatReport, forecast, dayBase, addWorkMinutes, workMinutes, parseBreaks, parseStatus,
   statusSideEffects, carryFrom, toCSV, normNum, looksLikeHeader,
+  filterForExport, exportTable, splitForExport, DEFAULT_EXPORT,
 } from '../js/logic.js';
 
 const MAIL = `
@@ -138,4 +139,27 @@ test('その他', () => {
   const se2 = statusSideEffects({ status: 'packed', packedDate: 'D', worker: 'x' }, 'shipped', 'E', 'me');
   assert.equal(se2.packedDate, undefined); // 梱包日は維持
   assert.equal(toCSV([['a', 'b,c'], ['"q"', '']]), 'a,"b,c"\r\n"""q""",');
+});
+
+test('書き出し：未完了を含む全件・条件・列・シート分け', () => {
+  const units = {
+    160: { pc: 160, yrl: 'Y0', status: 'todo', worker: '' },
+    161: { pc: 161, yrl: 'Y1', status: 'wip', worker: '佐藤' },
+    162: { pc: 162, yrl: 'Y2', slip: 'S2', status: 'packed', worker: '山田', packedDate: '2026-10-07' },
+    163: { pc: 163, yrl: 'Y3', slip: 'S3', status: 'shipped', worker: '山田', packedDate: '2026-10-08' },
+    164: { pc: 164, yrl: 'Y4', status: 'hold', worker: '佐藤' },
+  };
+  assert.equal(filterForExport(units, DEFAULT_EXPORT).length, 5);
+  const ranged = filterForExport(units, { dateFrom: '2026-10-08', dateTo: '2026-10-08' });
+  assert.deepEqual(ranged.map((u) => u.pc), [160, 161, 163, 164]); // 未完了は残る
+  assert.deepEqual(filterForExport(units, { statuses: ['todo', 'wip', 'hold'] }).map((u) => u.pc), [160, 161, 164]);
+  assert.deepEqual(filterForExport(units, { worker: 'none' }).map((u) => u.pc), [160]);
+  assert.deepEqual(filterForExport(units, { slip: 'has' }).map((u) => u.pc), [162, 163]);
+  assert.deepEqual(filterForExport(units, { sort: 'worker' }).map((u) => u.pc), [161, 164, 162, 163, 160]);
+  const t = exportTable(filterForExport(units, {}), { columns: ['status', 'pc'] });
+  assert.deepEqual(t[0], ['PC番号', 'ステータス']); // 列順は固定
+  assert.deepEqual(t[1], [160, '未着手']);
+  const sheets = splitForExport(filterForExport(units, {}), 'status');
+  assert.deepEqual(sheets.map((g) => g.name), ['未着手', '作業中', '梱包済み', '発送済み', '保留・不具合']);
+  assert.deepEqual(splitForExport(filterForExport(units, {}), 'worker').map((g) => g.name), ['未割当', '佐藤', '山田']);
 });

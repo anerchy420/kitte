@@ -2,7 +2,7 @@ import {
   STATUSES, STATUS_LABEL, DEFAULT_CONFIG, YRL_RE, SLIP_RE, isDone, normNum, parsePc,
   dateKey, fmtTime, fmtDur, hm, forecast, doneOn, carryFrom, activeMembers,
   textToTable, guessMapping, looksLikeHeader, rowsToRecords, planImport, buildImportUpdates,
-  statusSideEffects, formatReport, EXPORT_HEADERS, exportRows, toCSV, dailySummary,
+  statusSideEffects, formatReport, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 
@@ -261,6 +261,7 @@ function rerender(what) {
   if (S.tab === 'home') renderHome();
   if (S.tab === 'list') renderListBody();
   if (S.tab === 'io' && what === 'units' && S.io.table) renderPlan();
+  if (S.tab === 'io' && (what === 'units' || what === 'cfg') && !$('#ex-box')?.contains(document.activeElement)) renderExport();
   if (S.tab === 'history' && what === 'units') renderHistory();
   if (S.tab === 'settings' && what === 'cfg' && !$('#tab-settings').contains(document.activeElement)) renderSettings();
 }
@@ -771,14 +772,8 @@ function renderIO() {
       <p class="muted small">対象：その日に梱包済み（発送済み含む）になったPC。作業者ごと・PC番号順。書式は設定で変更できます。</p>
     </div>
 
-    <div class="card">
-      <div class="card-h"><h2>書き出し</h2></div>
-      <div class="row wrap">
-        <button class="btn" id="ex-xlsx">Excel (.xlsx)</button>
-        <button class="btn" id="ex-csv">CSV</button>
-      </div>
-      <p class="muted small">Excelは「全件」「日別実績」の2シート。CSVは全件（Excelで文字化けしないBOM付きUTF-8）。</p>
-    </div>`;
+    <div class="card" id="ex-box"></div>
+`;
 
   const sel = $('#io-mode');
   if (sel) sel.value = io.mode;
@@ -805,8 +800,7 @@ function renderIO() {
   $('#rp-copy').onclick = () => copyText($('#rp-text').value);
   $('#rp-share').onclick = () => shareText($('#rp-text').value, `キッティング実績 ${io.reportDate}`);
   $('#rp-dl').onclick = () => download(`実績_${io.reportDate}${io.reportWorker ? '_' + io.reportWorker : ''}.txt`, $('#rp-text').value, 'text/plain');
-  $('#ex-csv').onclick = () => download(`kitting_${stamp()}.csv`, '﻿' + toCSV([EXPORT_HEADERS, ...exportRows(S.units)]), 'text/csv');
-  $('#ex-xlsx').onclick = exportXLSX;
+  renderExport();
   if (io.table) { renderMapping(); renderPlan(); }
 }
 function reportText() {
@@ -1000,21 +994,110 @@ function renderPlan() {
   };
 }
 
+// ---- 書き出し ----
+const BOM = String.fromCharCode(0xfeff);
+const exportOpts = () => ({ ...DEFAULT_EXPORT, ...(S.cfg.exportOpts || {}) });
+let exSaveTimer;
+function saveExportOpts(o) {
+  S.cfg.exportOpts = o;
+  clearTimeout(exSaveTimer);
+  exSaveTimer = setTimeout(() => S.store.setConfig({ exportOpts: o }), 500);
+}
+const EX_PRESETS = {
+  all: { label: '全件（未完了含む）', p: () => ({ statuses: DEFAULT_EXPORT.statuses, worker: 'all', dateFrom: '', dateTo: '', slip: 'all' }) },
+  todo: { label: '未完了のみ', p: () => ({ statuses: ['todo', 'wip', 'hold'], worker: 'all', dateFrom: '', dateTo: '', slip: 'all' }) },
+  today: { label: '本日の実績', p: () => ({ statuses: ['packed', 'shipped'], worker: 'all', dateFrom: S.today, dateTo: S.today, slip: 'all' }) },
+  unshipped: { label: '未発送（梱包済み）', p: () => ({ statuses: ['packed'], worker: 'all', dateFrom: '', dateTo: '', slip: 'all' }) },
+};
+const opt = (v, l, cur) => `<option value="${esc(v)}" ${cur === v ? 'selected' : ''}>${esc(l)}</option>`;
+
+function renderExport() {
+  const box = $('#ex-box');
+  if (!box) return;
+  const o = exportOpts();
+  const n = filterForExport(S.units, o).length;
+  const cols = exportColumns(o);
+  const opened = box.querySelector('details')?.open ?? false;
+  box.innerHTML = `
+    <div class="card-h"><h2>書き出し（Excel / CSV）</h2></div>
+    <div class="chips static">${Object.entries(EX_PRESETS).map(([k, v]) => `<button class="chip" data-preset="${k}">${v.label}</button>`).join('')}</div>
+    <p class="ex-sum">対象 <b>${n}</b>件 / 全${Object.keys(S.units).length}件　列 ${cols.length}個</p>
+    <details ${opened ? 'open' : ''}><summary>出力設定</summary>
+      <div class="lbl">ステータス（未完了も選べます）</div>
+      <div class="checks">${STATUSES.map((st) => `<label class="ck"><input type="checkbox" data-st="${st.key}" ${o.statuses.includes(st.key) ? 'checked' : ''}>${st.label}</label>`).join('')}</div>
+      <div class="map-grid">
+        <label>作業者<select data-o="worker">${opt('all', '全員', o.worker)}${opt('none', '未割当のみ', o.worker)}${allWorkers().map((w) => opt(w, w, o.worker)).join('')}</select></label>
+        <label>伝票番号<select data-o="slip">${opt('all', 'すべて', o.slip)}${opt('has', 'ありのみ', o.slip)}${opt('none', 'なしのみ', o.slip)}</select></label>
+        <label>梱包日（から）<input type="date" data-o="dateFrom" value="${esc(o.dateFrom)}"></label>
+        <label>梱包日（まで）<input type="date" data-o="dateTo" value="${esc(o.dateTo)}"></label>
+      </div>
+      <p class="muted small">梱包日の範囲は梱包済み・発送済みのPCにだけ適用されます（未完了のPCはステータスの指定どおり出力）。</p>
+      <div class="lbl">出力する列</div>
+      <div class="checks">${EXPORT_COLUMNS.map((c) => `<label class="ck"><input type="checkbox" data-col="${c.key}" ${o.columns.includes(c.key) ? 'checked' : ''}>${c.label}</label>`).join('')}</div>
+      <div class="map-grid">
+        <label>並び順<select data-o="sort">${opt('pc', 'PC番号順', o.sort)}${opt('worker', '作業者→PC番号', o.sort)}${opt('status', 'ステータス→PC番号', o.sort)}${opt('packedDate', '梱包日→PC番号', o.sort)}</select></label>
+        <label>Excelのシート分け<select data-o="split">${opt('none', '1シートにまとめる', o.split)}${opt('status', 'ステータスごと', o.split)}${opt('worker', '作業者ごと', o.split)}</select></label>
+      </div>
+      <label class="check-l"><input type="checkbox" data-o="summary" ${o.summary ? 'checked' : ''}> Excelに「日別実績」シートを付ける</label>
+      <button class="link" data-reset>設定を初期値に戻す</button>
+    </details>
+    <div class="row wrap">
+      <button class="btn primary" id="ex-xlsx" ${n ? '' : 'disabled'}>Excel (.xlsx)</button>
+      <button class="btn" id="ex-csv" ${n ? '' : 'disabled'}>CSV</button>
+    </div>
+    <p class="muted small">出力設定はチームで共有されます。CSVはExcelで文字化けしないBOM付きUTF-8です。</p>`;
+  box.onchange = (e) => {
+    const t = e.target;
+    const cur = exportOpts();
+    if (t.dataset.st) cur.statuses = STATUSES.map((x) => x.key).filter((k) => (k === t.dataset.st ? t.checked : cur.statuses.includes(k)));
+    else if (t.dataset.col) cur.columns = EXPORT_COLUMNS.map((c) => c.key).filter((k) => (k === t.dataset.col ? t.checked : cur.columns.includes(k)));
+    else if (t.dataset.o === 'summary') cur.summary = t.checked;
+    else if (t.dataset.o) cur[t.dataset.o] = t.value;
+    else return;
+    if (!cur.columns.length) { toast('列を1つ以上選んでください', 'warn'); renderExport(); return; }
+    saveExportOpts(cur);
+    renderExport();
+  };
+  box.onclick = (e) => {
+    const pr = e.target.closest('[data-preset]');
+    if (pr) {
+      const ps = EX_PRESETS[pr.dataset.preset];
+      saveExportOpts({ ...exportOpts(), ...ps.p() });
+      renderExport();
+      toast(`「${ps.label}」に設定しました`);
+    }
+    if (e.target.closest('[data-reset]')) { saveExportOpts({ ...DEFAULT_EXPORT }); renderExport(); }
+  };
+  $('#ex-csv').onclick = () => {
+    const o2 = exportOpts();
+    download(`kitting_${stamp()}.csv`, BOM + toCSV(exportTable(filterForExport(S.units, o2), o2)), 'text/csv');
+  };
+  $('#ex-xlsx').onclick = exportXLSX;
+}
+
 async function exportXLSX() {
   try {
     const XLSX = await loadXLSX();
+    const o = exportOpts();
+    const list = filterForExport(S.units, o);
+    const widths = exportColumns(o).map((c) => ({ wch: c.w }));
     const wb = XLSX.utils.book_new();
-    const ws1 = XLSX.utils.aoa_to_sheet([EXPORT_HEADERS, ...exportRows(S.units)]);
-    ws1['!cols'] = [8, 13, 17, 10, 10, 11, 17, 10, 24].map((w) => ({ wch: w }));
-    XLSX.utils.book_append_sheet(wb, ws1, '全件');
-    const days = await S.store.listDays();
-    const sum = dailySummary(S.units, days);
-    const workers = allWorkers();
-    const ws2 = XLSX.utils.aoa_to_sheet([
-      ['日付', '目標', '繰越', '合計目標', '完了(梱包済み)', '差', ...workers],
-      ...sum.map((d) => [d.date, d.target, d.carry, d.goal, d.done, d.done - d.goal, ...workers.map((w) => d.byWorker[w] || 0)]),
-    ]);
-    XLSX.utils.book_append_sheet(wb, ws2, '日別実績');
+    for (const g of splitForExport(list, o.split)) {
+      const ws = XLSX.utils.aoa_to_sheet(exportTable(g.list, o));
+      ws['!cols'] = widths;
+      ws['!autofilter'] = { ref: ws['!ref'] };
+      XLSX.utils.book_append_sheet(wb, ws, g.name);
+    }
+    if (o.summary) {
+      const days = await S.store.listDays();
+      const sum = dailySummary(S.units, days);
+      const workers = allWorkers();
+      const ws2 = XLSX.utils.aoa_to_sheet([
+        ['日付', '目標', '繰越', '合計目標', '完了(梱包済み)', '差', ...workers],
+        ...sum.map((d) => [d.date, d.target, d.carry, d.goal, d.done, d.done - d.goal, ...workers.map((w) => d.byWorker[w] || 0)]),
+      ]);
+      XLSX.utils.book_append_sheet(wb, ws2, '日別実績');
+    }
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     download(`kitting_${stamp()}.xlsx`, new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
   } catch (e) {

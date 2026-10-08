@@ -251,3 +251,9 @@ details.preview summary { cursor: pointer; color: var(--primary); }
 }
 .toast.warn { background: #8a5a00; }
 .toast.err { background: #a52a2a; }
+.checks { display: flex; flex-wrap: wrap; gap: 6px 8px; margin-bottom: 8px; }
+.ck { display: inline-flex; align-items: center; gap: 4px; margin: 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: 99px; background: var(--bg); color: var(--text); font-size: 13px; }
+.ck input { width: auto; margin: 0; }
+.ex-sum { margin: 8px 0; }
+#ex-box details { margin: 8px 0 12px; }
+#ex-box summary { cursor: pointer; color: var(--primary); font-weight: 600; padding: 4px 0; }

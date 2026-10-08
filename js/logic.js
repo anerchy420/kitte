@@ -419,12 +419,84 @@ export function formatReport(units, date, cfg, opts = {}) {
   return [...parts, footer].filter(Boolean).join('\n\n');
 }
 
-export const EXPORT_HEADERS = ['PC番号', 'YRL番号', '発送伝票番号', '作業者', 'ステータス', '梱包日', '更新日時', '更新者', '備考'];
-export function exportRows(units) {
-  const fmt = (ms) => (ms ? `${dateKey(ms)} ${fmtTime(ms)}` : '');
-  return Object.values(units).sort(byPc).map((u) => [
-    u.pc, u.yrl || '', u.slip || '', u.worker || '', STATUS_LABEL[u.status] || '', u.packedDate || '', fmt(u.updatedAt), u.updatedBy || '', u.note || '',
-  ]);
+const fmtDT = (ms) => (ms ? `${dateKey(ms)} ${fmtTime(ms)}` : '');
+export const EXPORT_COLUMNS = [
+  { key: 'pc', label: 'PC番号', w: 8, get: (u) => u.pc },
+  { key: 'yrl', label: 'YRL番号', w: 13, get: (u) => u.yrl || '' },
+  { key: 'slip', label: '発送伝票番号', w: 17, get: (u) => u.slip || '' },
+  { key: 'worker', label: '作業者', w: 10, get: (u) => u.worker || '' },
+  { key: 'status', label: 'ステータス', w: 10, get: (u) => STATUS_LABEL[u.status] || '' },
+  { key: 'packedDate', label: '梱包日', w: 11, get: (u) => u.packedDate || '' },
+  { key: 'packedAt', label: '梱包日時', w: 17, get: (u) => fmtDT(u.packedAt) },
+  { key: 'shippedAt', label: '発送日時', w: 17, get: (u) => (u.status === 'shipped' ? fmtDT(u.shippedAt) : '') },
+  { key: 'updatedAt', label: '更新日時', w: 17, get: (u) => fmtDT(u.updatedAt) },
+  { key: 'updatedBy', label: '更新者', w: 10, get: (u) => u.updatedBy || '' },
+  { key: 'createdAt', label: '登録日時', w: 17, get: (u) => fmtDT(u.createdAt) },
+  { key: 'note', label: '備考', w: 24, get: (u) => u.note || '' },
+];
+export const DEFAULT_EXPORT = {
+  statuses: STATUSES.map((s) => s.key), // 未完了も含めて全ステータス
+  worker: 'all', // all | none | 名前
+  dateFrom: '', // 梱包日の範囲（梱包済み/発送済みにだけ適用）
+  dateTo: '',
+  slip: 'all', // all | has | none
+  columns: ['pc', 'yrl', 'slip', 'worker', 'status', 'packedDate', 'updatedAt', 'updatedBy', 'note'],
+  sort: 'pc', // pc | worker | status | packedDate
+  split: 'none', // Excelのシート分け: none | status | worker
+  summary: true, // Excelに日別実績シートを付ける
+};
+const STATUS_ORDER = Object.fromEntries(STATUSES.map((s, i) => [s.key, i]));
+
+export function filterForExport(units, opts = {}) {
+  const o = { ...DEFAULT_EXPORT, ...opts };
+  const st = new Set(o.statuses);
+  const list = Object.values(units).filter((u) => {
+    if (!st.has(u.status)) return false;
+    if (o.worker === 'none' ? u.worker : o.worker !== 'all' && u.worker !== o.worker) return false;
+    if (o.slip === 'has' && !u.slip) return false;
+    if (o.slip === 'none' && u.slip) return false;
+    if (isDone(u.status) && (o.dateFrom || o.dateTo)) {
+      const d = u.packedDate || '';
+      if (o.dateFrom && d < o.dateFrom) return false;
+      if (o.dateTo && d > o.dateTo) return false;
+    }
+    return true;
+  });
+  const cmp = {
+    pc: byPc,
+    worker: (a, b) => (a.worker || '\uffff').localeCompare(b.worker || '\uffff', 'ja') || byPc(a, b),
+    status: (a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || byPc(a, b),
+    packedDate: (a, b) => (a.packedDate || '9999').localeCompare(b.packedDate || '9999') || byPc(a, b),
+  }[o.sort] || byPc;
+  return list.sort(cmp);
+}
+
+export function exportColumns(opts = {}) {
+  const keys = new Set((opts.columns?.length ? opts.columns : DEFAULT_EXPORT.columns));
+  return EXPORT_COLUMNS.filter((c) => keys.has(c.key));
+}
+
+// [見出し, ...行]
+export function exportTable(list, opts = {}) {
+  const cols = exportColumns(opts);
+  return [cols.map((c) => c.label), ...list.map((u) => cols.map((c) => c.get(u)))];
+}
+
+// Excelのシート分け: [{ name, list }]
+export function splitForExport(list, split) {
+  if (split === 'status') {
+    return STATUSES.map((s) => ({ name: s.label.replace(/[\\/?*[\]:]/g, '・'), list: list.filter((u) => u.status === s.key) })).filter((g) => g.list.length);
+  }
+  if (split === 'worker') {
+    const m = new Map();
+    for (const u of list) {
+      const w = u.worker || '未割当';
+      if (!m.has(w)) m.set(w, []);
+      m.get(w).push(u);
+    }
+    return [...m].map(([name, l]) => ({ name: name.replace(/[\\/?*[\]:]/g, '・').slice(0, 31), list: l }));
+  }
+  return [{ name: '一覧', list }];
 }
 
 export function toCSV(rows) {
