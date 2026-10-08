@@ -6,6 +6,7 @@ import {
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 
+const APP_VERSION = '2026-10-09a';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -1393,6 +1394,7 @@ function renderSettings() {
     <div class="card">
       <div class="card-h"><h2>この端末</h2></div>
       <p>ログイン中：<b>${esc(S.me)}</b>　${isDemo ? '<span class="pill">デモモード</span>' : ''}</p>
+      <p class="muted small">バージョン ${APP_VERSION}</p>
       <div class="row wrap">
         <button class="btn" id="s-name">名前を変更</button>
         <button class="btn" id="s-logout">ログアウト</button>
@@ -1461,6 +1463,8 @@ setInterval(() => {
 }, 30000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && S.tab === 'home') renderHome(); });
 
-if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((r) => r.update()).catch(() => {});
+}
 
 start();
