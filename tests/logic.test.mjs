@@ -208,3 +208,41 @@ test('伝票番号のハイフン自動挿入', async () => {
   const b = textToTable('≪271≫　≪01-0973136≫　≪391214189100≫', 'bracket', {});
   assert.equal(rowsToRecords(b.rows, { pc: 0, yrl: 1, slip: 2 })[0].slip, '3912-1418-9100');
 });
+
+test('計画：貼り付け・累計・進捗表・遅れ分', async () => {
+  const { parsePlanText, progressTable, planSummary, planCarry } = await import('../js/logic.js');
+  const plan = parsePlanText(`日付 当日目標 目標累計
+10/7(水)本日 35 120
+10/8(木) 55 175
+10/9(金) 55 230
+10/12(祝) 33 329
+10/16(金) 6 500(完了)`, '2026-10-09');
+  assert.equal(plan.length, 5);
+  assert.deepEqual(plan[3], { d: '2026-10-12', t: 33, c: 329, h: true, cum: 329 });
+  // 累計なしは自動計算
+  const p2 = parsePlanText('10/7 35\n10/8 55', '2026-10-09');
+  assert.deepEqual(p2.map((r) => r.cum), [35, 90]);
+  // 実績：計画前に80台、10/7に30台、10/8に50台、10/9に10台
+  const units = {};
+  let n = 0;
+  const add = (date, k) => { for (let i = 0; i < k; i++) { n++; units[n] = { pc: n, status: 'packed', packedDate: date }; } };
+  add('2026-10-01', 80); add('2026-10-07', 30); add('2026-10-08', 50); add('2026-10-09', 10);
+  units[999] = { pc: 999, status: 'todo' };
+  const rows = progressTable(units, plan, '2026-10-09');
+  const r7 = rows.find((r) => r.date === '2026-10-07');
+  assert.equal(r7.cumActual, 110);
+  assert.equal(r7.diff, -10);
+  const r8 = rows.find((r) => r.date === '2026-10-08');
+  assert.equal(r8.cumActual, 160);
+  assert.equal(r8.diff, -15);
+  const r12 = rows.find((r) => r.date === '2026-10-12');
+  assert.equal(r12.future, true);
+  assert.equal(r12.actual, null);
+  assert.equal(planCarry(units, plan, '2026-10-09'), 15);
+  const s = planSummary(units, plan, '2026-10-09', 500);
+  assert.equal(s.done, 170);
+  assert.equal(s.cumTargetToday, 230);
+  assert.equal(s.diff, -60);
+  assert.equal(s.planEnd, '2026-10-16');
+  assert.equal(s.forecastEnd, '2026-10-15'); // 平均(80+30+50)/3≒53台/日、残り330台
+});

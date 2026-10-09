@@ -18,6 +18,8 @@ export const DEFAULT_CONFIG = {
   workStart: '07:00',
   workEnd: '19:00',
   overtimeLimit: '22:00',
+  projectTotal: 0, // 総台数（0なら計画の最終累計か登録台数）
+  plan: [], // 日別計画 [{ d, t, c?, h? }]
   breaks: '12:00-13:00',
   pcMin: 160,
   pcMax: 660,
@@ -560,4 +562,120 @@ export function dailySummary(units, days) {
     const goal = Number(day.target || 0) + Number(day.carry || 0);
     return { date: d, target: Number(day.target || 0), carry: Number(day.carry || 0), goal, done: list.length, byWorker: byW, day };
   });
+}
+
+// ---------- 計画（日別目標・目標累計） ----------
+// plan = [{ d: 'YYYY-MM-DD', t: 当日目標, c: 目標累計(任意), h: 祝日なら true }]
+const WD = '日月火水木金土';
+export function weekdayLabel(key, holiday) {
+  const d = new Date(dayBase(key));
+  return holiday ? '祝' : WD[d.getDay()];
+}
+
+// 「10/7(水) 35 120」「2026-10-08 55 175」などを1行ずつ読む
+export function parsePlanText(text, today = dateKey()) {
+  const [ty, tm] = today.split('-').map(Number);
+  const rows = [];
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = normNum(raw).replace(/[／]/g, '/');
+    const m = /(?:(\d{4})[-/年])?(\d{1,2})[-/月](\d{1,2})日?/.exec(line);
+    if (!m) continue;
+    let y = m[1] ? Number(m[1]) : ty;
+    const mo = Number(m[2]);
+    if (!m[1] && Math.abs(mo - tm) > 6) y += mo < tm ? 1 : -1; // 年またぎ
+    const d = `${y}-${String(mo).padStart(2, '0')}-${String(Number(m[3])).padStart(2, '0')}`;
+    const rest = line.slice(m.index + m[0].length).replace(/\([^)]*\)|（[^）]*）/g, (p) => (/祝/.test(p) ? ' 祝 ' : ' '));
+    const nums = (rest.match(/\d+/g) || []).map(Number);
+    if (!nums.length) continue;
+    rows.push({ d, t: nums[0], ...(nums[1] != null ? { c: nums[1] } : {}), ...(/祝/.test(rest) ? { h: true } : {}) });
+  }
+  return normalizePlan(rows);
+}
+
+// 日付順・重複除去・累計を補完
+export function normalizePlan(rows) {
+  const m = new Map();
+  for (const r of rows || []) if (r?.d) m.set(r.d, { ...r, t: Math.max(0, Number(r.t) || 0) });
+  const out = [...m.values()].sort((a, b) => a.d.localeCompare(b.d));
+  let cum = 0;
+  for (const r of out) {
+    if (r.c != null && r.c !== '' && Number.isFinite(Number(r.c))) cum = Number(r.c);
+    else cum += r.t;
+    r.cum = cum;
+  }
+  return out;
+}
+
+// 日付 → 完了台数、日付以前の累計
+function doneCounts(units) {
+  const by = {};
+  let undated = 0;
+  for (const u of Object.values(units)) {
+    if (!isDone(u.status)) continue;
+    if (u.packedDate) by[u.packedDate] = (by[u.packedDate] || 0) + 1;
+    else undated++;
+  }
+  return { by, undated };
+}
+
+// 進捗表：計画の日＋実績のある日。未来日は実績なし
+export function progressTable(units, planRows, today) {
+  const plan = normalizePlan(planRows);
+  const { by, undated } = doneCounts(units);
+  const pmap = new Map(plan.map((r) => [r.d, r]));
+  const dates = [...new Set([...plan.map((r) => r.d), ...Object.keys(by)])].sort();
+  let cumA = undated;
+  let cumT = 0;
+  // 計画開始前の実績も累計に含める
+  return dates.map((d) => {
+    const p = pmap.get(d);
+    if (p) cumT = p.cum;
+    const actual = by[d] || 0;
+    cumA += actual;
+    const past = d <= today;
+    return {
+      date: d, holiday: !!p?.h, target: p ? p.t : null, cumTarget: p || cumT ? cumT : null,
+      actual: past ? actual : null, cumActual: past ? cumA : null,
+      diff: past && (p || cumT) ? cumA - cumT : null, isToday: d === today, future: !past,
+    };
+  });
+}
+
+// 全体のまとめ。total: 総台数
+export function planSummary(units, planRows, today, total) {
+  const rows = progressTable(units, planRows, today);
+  const plan = normalizePlan(planRows);
+  const done = Object.values(units).filter((u) => isDone(u.status)).length;
+  const tot = Number(total) || plan.at(-1)?.cum || Object.keys(units).length;
+  const upto = rows.filter((r) => !r.future);
+  const todayRow = rows.find((r) => r.isToday);
+  const prevRow = [...upto].reverse().find((r) => r.date < today);
+  const cumTargetToday = todayRow?.cumTarget ?? prevRow?.cumTarget ?? 0;
+  const planEnd = plan.find((r) => r.cum >= tot)?.d || null;
+  // 直近の稼働日（実績>0）最大5日の平均ペース（本日は途中なので除く）
+  const recent = upto.filter((r) => r.date < today && r.actual > 0).slice(-5);
+  const avg = recent.length ? recent.reduce((a, r) => a + r.actual, 0) / recent.length : 0;
+  const remaining = Math.max(0, tot - done);
+  let forecastEnd = null;
+  if (!remaining) forecastEnd = today;
+  else if (avg) {
+    const doneToday = todayRow?.actual || 0;
+    const left = Math.max(0, remaining - Math.max(0, avg - doneToday)); // 本日分の残り見込みを差し引く
+    const days = Math.ceil(left / avg);
+    forecastEnd = dateKey(dayBase(today) + days * 86400000 + 3600000);
+  }
+  return {
+    total: tot, done, remaining, cumTargetToday, diff: done - cumTargetToday,
+    planEnd, avg, forecastEnd, rows,
+    todayPlan: plan.find((r) => r.d === today) || null,
+    prevCumTarget: prevRow?.cumTarget ?? 0, prevCumActual: prevRow?.cumActual ?? 0,
+  };
+}
+
+// 計画がある日の「繰越」= 前日までの目標累計 − 前日までの実績累計（遅れ分）
+export function planCarry(units, planRows, date) {
+  const rows = progressTable(units, planRows, date).filter((r) => r.date < date);
+  const last = rows.at(-1);
+  if (!last || last.cumTarget == null) return 0;
+  return Math.max(0, last.cumTarget - last.cumActual);
 }

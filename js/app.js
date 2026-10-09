@@ -2,11 +2,12 @@ import {
   STATUSES, STATUS_LABEL, DEFAULT_CONFIG, YRL_RE, SLIP_RE, isDone, normNum, normSlip, parsePc, parseStatus,
   dateKey, fmtTime, fmtDur, hm, forecast, doneOn, carryFrom, activeMembers,
   textToTable, guessMapping, looksLikeHeader, rowsToRecords, planImport, buildImportUpdates,
+  weekdayLabel, parsePlanText, normalizePlan, progressTable, planSummary, planCarry, dayBase,
   statusSideEffects, buildEditUpdates, formatReport, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 
-const APP_VERSION = '2026-10-09b';
+const APP_VERSION = '2026-10-09d';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -226,8 +227,11 @@ async function maybeEnsureDay() {
   try {
     const days = await S.store.listDays();
     const prev = Object.keys(days).filter((k) => k < S.today).sort().pop();
-    const carry = prev ? carryFrom(days[prev], doneOn(S.units, prev).length) : 0;
-    await S.store.createDayIfAbsent(S.today, { target: Number(S.cfg.defaultTarget) || 0, carry, carryFrom: prev || null, att: {}, createdAt: Date.now() });
+    const tp = (S.cfg.plan || []).find((r) => r.d === S.today);
+    // 計画がある日は「計画の当日目標＋前日までの遅れ分」、なければ「初期目標＋前日の未達分」
+    const carry = tp ? planCarry(S.units, S.cfg.plan, S.today) : prev ? carryFrom(days[prev], doneOn(S.units, prev).length) : 0;
+    const target = tp ? tp.t : Number(S.cfg.defaultTarget) || 0;
+    await S.store.createDayIfAbsent(S.today, { target, carry, carryFrom: tp ? 'plan' : prev || null, att: {}, createdAt: Date.now() });
   } finally {
     ensuring = false;
   }
@@ -383,10 +387,11 @@ function renderHome() {
       <div class="card-h"><h2>本日の目標</h2><button class="link" data-act="target">編集</button></div>
       <div class="big-stats">
         <div><small>完了(梱包済み)</small><b class="xl">${f.done}</b></div>
-        <div><small>目標</small><b>${f.goal}</b><small class="muted">${S.day.carry ? `(${S.day.target}+繰越${S.day.carry})` : ''}</small></div>
+        <div><small>目標</small><b>${f.goal}</b><small class="muted">${S.day.carry ? `(${S.day.target}+${S.day.carryFrom === 'plan' ? '遅れ' : '繰越'}${S.day.carry})` : ''}</small></div>
         <div><small>残り</small><b class="${f.remaining ? 'accent' : 'okc'}">${f.remaining}</b></div>
       </div>
       <div class="progress"><i style="width:${pct}%"></i><span>${pct}%</span></div>
+      ${homePlanLine()}
     </div>
 
     <div class="card">
@@ -426,6 +431,17 @@ function renderHome() {
     </div>`;
 }
 
+function homePlanLine() {
+  const plan = S.cfg.plan || [];
+  if (!plan.length) return '';
+  const ps = planSummary(S.units, plan, S.today, S.cfg.projectTotal);
+  const lag = ps.prevCumActual - ps.prevCumTarget;
+  return `<button class="plan-line" data-act="goto-progress">
+    <span>累計 <b>${ps.done}</b> / ${ps.total}台</span>
+    <span class="diff-chip ${lag >= 0 ? 'ahead' : 'behind'}">前日まで ${lag > 0 ? '+' : ''}${lag}</span>
+    <span class="muted">›</span></button>`;
+}
+
 function onHomeClick(e) {
   const b = e.target.closest('[data-act]');
   if (!b) return;
@@ -433,6 +449,7 @@ function onHomeClick(e) {
   if (act === 'att') toggleAttendance(b.dataset.name);
   if (act === 'att-edit') openAttendanceEditor();
   if (act === 'target') openTargetEditor();
+  if (act === 'goto-progress') switchTab('history');
   if (act === 'goto-list') { S.list.status = b.dataset.status; S.list.worker = 'all'; switchTab('list'); }
 }
 
@@ -441,12 +458,17 @@ function openTargetEditor(date = S.today, day = S.day || {}) {
     <h3>${date === S.today ? '本日' : esc(date)}の目標（${esc(date)}）</h3>
     <label>目標台数<input id="t-target" type="number" inputmode="numeric" value="${day.target || 0}"></label>
     <label>前日からの繰越<input id="t-carry" type="number" inputmode="numeric" value="${day.carry || 0}"></label>
-    <p class="muted small">合計目標 = 目標 + 繰越。繰越は前日の未達分から自動計算されます${day.carryFrom ? `（${day.carryFrom}分）` : ''}。</p>
+    <p class="muted small">合計目標 = 目標 + 繰越。繰越は${day.carryFrom === 'plan' ? '計画の目標累計と実績累計の差（遅れ分）' : `前日の未達分${day.carryFrom ? `（${day.carryFrom}分）` : ''}`}から自動計算されます。</p>
     <button id="t-recalc" class="btn">繰越を再計算</button>
     <div class="sheet-actions"><button class="btn" data-close>キャンセル</button><button id="t-save" class="btn primary">保存</button></div>`, (sh) => {
     sh.querySelector('[data-close]').onclick = closeSheet;
     $('#t-recalc').onclick = async () => {
       const days = await S.store.listDays();
+      if ((S.cfg.plan || []).some((r) => r.d === date)) {
+        $('#t-carry').value = planCarry(S.units, S.cfg.plan, date);
+        toast('計画の目標累計と実績累計の差から計算しました');
+        return;
+      }
       const prev = Object.keys(days).filter((k) => k < date).sort().pop();
       $('#t-carry').value = prev ? carryFrom(days[prev], doneOn(S.units, prev).length) : 0;
       toast(prev ? `${prev}の未達分から計算しました` : '前日のデータがありません');
@@ -1307,7 +1329,7 @@ async function exportXLSX() {
   }
 }
 
-// ================= 履歴 =================
+// ================= 進捗 =================
 async function loadHistory() {
   $('#tab-history').innerHTML = '<div class="card"><p class="muted">読み込み中…</p></div>';
   try {
@@ -1318,54 +1340,229 @@ async function loadHistory() {
   }
   renderHistory();
 }
+const mdw = (d, h) => `${Number(d.slice(5, 7))}/${Number(d.slice(8))}(${weekdayLabel(d, h)})`;
+const signed = (n) => (n > 0 ? `+${n}` : String(n));
+
 function renderHistory() {
   if (!S.history) return;
+  const plan = S.cfg.plan || [];
+  const ps = planSummary(S.units, plan, S.today, S.cfg.projectTotal);
   const days = { ...S.history };
   if (S.day) days[S.today] = S.day;
-  const sum = dailySummary(S.units, days);
-  const all = Object.values(S.units);
-  const done = all.filter((u) => isDone(u.status)).length;
-  const workDays = sum.filter((d) => d.done > 0);
-  const avg = workDays.length ? workDays.reduce((a, d) => a + d.done, 0) / workDays.length : 0;
+  const pct = ps.total ? Math.min(100, (ps.done / ps.total) * 100) : 0;
+  const planPct = ps.total ? Math.min(100, (ps.cumTargetToday / ps.total) * 100) : 0;
+  const lag = ps.prevCumActual - ps.prevCumTarget; // 前日終了時点の計画比
+  const diffCls = lag >= 0 ? 'ahead' : 'behind';
+  const todayRow = ps.rows.find((r) => r.isToday);
+  const late = ps.planEnd && ps.forecastEnd && ps.forecastEnd > ps.planEnd;
+
+  const rowsHtml = ps.rows.map((r) => {
+    const dc = r.diff == null ? '' : r.diff >= 0 ? 'ahead' : 'behind';
+    return `<tr class="${r.isToday ? 'today' : ''} ${r.future ? 'future' : ''}" data-day="${r.date}">
+      <td class="d">${mdw(r.date, r.holiday)}${r.isToday ? '<span class="today-tag">本日</span>' : ''}</td>
+      <td>${r.target ?? '—'}</td>
+      <td><b>${r.actual ?? ''}</b></td>
+      <td>${r.cumTarget ?? '—'}</td>
+      <td><b>${r.cumActual ?? ''}</b></td>
+      <td class="diff ${r.isToday && r.diff < 0 ? 'pending' : dc}">${r.diff == null ? '' : r.isToday && r.diff < 0 ? `あと${-r.diff}` : signed(r.diff)}</td>
+    </tr>`;
+  }).join('');
+
   $('#tab-history').innerHTML = `
     <div class="card">
-      <div class="card-h"><h2>案件全体</h2><button class="link" id="h-reload">更新</button></div>
-      <div class="big-stats">
-        <div><small>登録台数</small><b>${all.length}</b></div>
-        <div><small>完了</small><b>${done}</b></div>
-        <div><small>残り</small><b class="accent">${all.length - done}</b></div>
+      <div class="card-h"><h2>全体の進捗</h2><span><button class="link" id="h-plan">計画を編集</button><button class="link" id="h-reload">更新</button></span></div>
+      <div class="hero">
+        <div><b class="hero-n">${ps.done}</b><span class="hero-d"> / ${ps.total}台</span></div>
+        ${plan.length ? `<span class="diff-chip ${diffCls}">前日まで ${signed(lag)}台</span>` : ''}
       </div>
-      <div class="progress"><i style="width:${all.length ? (done / all.length) * 100 : 0}%"></i><span>${all.length ? Math.round((done / all.length) * 100) : 0}%</span></div>
-      <p class="muted small">1日平均 ${avg.toFixed(1)}台 ${avg ? `→ 残りの所要日数 約${Math.ceil((all.length - done) / avg)}日` : ''}</p>
+      <div class="progress plan-bar" title="実績${Math.round(pct)}%">
+        <i style="width:${pct}%"></i>
+        ${plan.length ? `<em style="left:${planPct}%" title="本日までの目標累計 ${ps.cumTargetToday}"></em>` : ''}
+        <span>${Math.round(pct)}%</span>
+      </div>
+      <dl class="kv">
+        <dt>残り</dt><dd><b>${ps.remaining}</b>台</dd>
+        ${plan.length ? `${ps.todayPlan ? `<dt>本日</dt><dd><b>${todayRow?.actual ?? 0}</b> / ${ps.todayPlan.t}台${lag < 0 ? `<small class="muted">（＋遅れ${-lag}）</small>` : ''}</dd>` : ''}
+        <dt>本日終了時の目標累計</dt><dd>${ps.cumTargetToday}台（あと${Math.max(0, ps.cumTargetToday - ps.done)}）</dd>
+        <dt>計画の完了日</dt><dd>${ps.planEnd ? mdw(ps.planEnd) : '—'}</dd>` : ''}
+        <dt>今のペースだと</dt><dd>${ps.forecastEnd ? `<b class="${late ? 'behind' : 'ahead'}">${mdw(ps.forecastEnd)}</b> 完了見込み` : '—'}<br><small class="muted">直近の平均 ${ps.avg.toFixed(1)}台/日</small></dd>
+      </dl>
+      ${!plan.length ? `<p class="muted small">「計画を編集」で日別の目標（当日目標・目標累計）を入れると、計画との差がわかります。</p>` : ''}
     </div>
-    ${sum.map((d) => `
-      <div class="card day">
-        <div class="card-h"><h2>${esc(d.date)}</h2>${d.goal ? (d.done >= d.goal ? '<span class="badge st-packed">達成</span>' : `<span class="badge st-hold">未達 ${d.goal - d.done}台</span>`) : ''}</div>
-        <div class="day-stats"><span>完了 <b>${d.done}</b></span><span>目標 <b>${d.goal}</b>${d.carry ? `<small>(繰越${d.carry})</small>` : ''}</span></div>
-        <div class="muted small">${Object.entries(d.byWorker).map(([w, c]) => `${esc(w)} ${c}台`).join('　') || '実績なし'}</div>
-        <div class="row wrap day-btns">
-          ${d.done ? `<button class="btn sm" data-report="${esc(d.date)}">報告文</button><button class="btn sm" data-dgrid="${esc(d.date)}">実績を編集</button>` : ''}
-          <button class="btn sm" data-dtarget="${esc(d.date)}">目標を編集</button>
-        </div>
-      </div>`).join('') || '<div class="card"><p class="muted">まだ履歴はありません</p></div>'}`;
+
+    ${ps.rows.length ? `<div class="card">
+      <div class="card-h"><h2>累計の推移</h2></div>
+      <div id="burn" class="burn"></div>
+    </div>` : ''}
+
+    <div class="card">
+      <div class="card-h"><h2>日別</h2><span class="muted small">行をタップで詳細</span></div>
+      ${ps.rows.length ? `<div class="table-wrap prog-wrap"><table class="prog">
+        <thead><tr><th>日付</th><th>当日<br>目標</th><th>実績</th><th>目標<br>累計</th><th>実績<br>累計</th><th>差</th></tr></thead>
+        <tbody>${rowsHtml}</tbody></table></div>` : '<p class="muted">まだ計画も実績もありません</p>'}
+    </div>`;
+
   $('#h-reload').onclick = loadHistory;
-  $('#tab-history').querySelectorAll('[data-dgrid]').forEach((b) => (b.onclick = () => {
-    showListWith({ pdate: b.dataset.dgrid });
-    openGrid(filteredUnits().list);
-  }));
-  $('#tab-history').querySelectorAll('[data-dtarget]').forEach((b) => (b.onclick = () => {
-    const d = b.dataset.dtarget;
-    openTargetEditor(d, d === S.today ? S.day || {} : S.history?.[d] || {});
-  }));
-  $('#tab-history').querySelectorAll('[data-report]').forEach((b) => {
-    b.onclick = () => {
-      const text = formatReport(S.units, b.dataset.report, S.cfg);
-      openSheet(`<h3>${esc(b.dataset.report)} の報告文</h3><textarea rows="14" readonly>${esc(text)}</textarea>
-        <div class="sheet-actions"><button class="btn" data-close>閉じる</button><button class="btn" id="hs-share">共有</button><button class="btn primary" id="hs-copy">コピー</button></div>`, (sh) => {
-        sh.querySelector('[data-close]').onclick = closeSheet;
-        $('#hs-copy').onclick = () => copyText(text);
-        $('#hs-share').onclick = () => shareText(text, `キッティング実績 ${b.dataset.report}`);
-      });
+  $('#h-plan').onclick = openPlanEditor;
+  $('#tab-history').querySelector('tbody')?.addEventListener('click', (e) => {
+    const tr = e.target.closest('[data-day]');
+    if (tr) openDaySheet(tr.dataset.day, days);
+  });
+  if (ps.rows.length) drawBurn($('#burn'), ps);
+}
+
+// 累計の計画（破線）と実績（実線）。軸は1本
+function drawBurn(box, ps) {
+  const rows = ps.rows;
+  const W = 340, H = 190, L = 34, R = 44, T = 10, B = 24;
+  const n = rows.length;
+  const maxY = Math.max(ps.total, ...rows.map((r) => Math.max(r.cumTarget || 0, r.cumActual || 0)), 1);
+  const x = (i) => L + (n === 1 ? (W - L - R) / 2 : (i * (W - L - R)) / (n - 1));
+  const y = (v) => T + (H - T - B) * (1 - v / maxY);
+  const step = maxY > 400 ? 100 : maxY > 200 ? 50 : maxY > 80 ? 20 : 10;
+  const ticks = [];
+  for (let v = 0; v <= maxY; v += step) ticks.push(v);
+  const pts = (key) => rows.map((r, i) => (r[key] == null ? null : [x(i), y(r[key])])).filter(Boolean);
+  const path = (p) => p.map(([a, b], i) => `${i ? 'L' : 'M'}${a.toFixed(1)},${b.toFixed(1)}`).join('');
+  const planP = pts('cumTarget');
+  const actP = pts('cumActual');
+  const ti = rows.findIndex((r) => r.isToday);
+  const labelEvery = Math.ceil(n / 6);
+  const lastA = actP.at(-1);
+  const lastP = planP.at(-1);
+  box.innerHTML = `
+    <div class="legend"><span><i class="lg-act"></i>実績累計</span><span><i class="lg-plan"></i>目標累計</span></div>
+    <div class="burn-in">
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="累計の推移グラフ">
+      ${ticks.map((v) => `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="ax" x="${L - 4}" y="${y(v) + 3}" text-anchor="end">${v}</text>`).join('')}
+      ${ps.total ? `<line class="goal" x1="${L}" x2="${W - R}" y1="${y(ps.total)}" y2="${y(ps.total)}"/>` : ''}
+      ${rows.map((r, i) => (i % labelEvery === 0 || i === n - 1 ? `<text class="ax" x="${x(i)}" y="${H - 6}" text-anchor="middle">${Number(r.date.slice(5, 7))}/${Number(r.date.slice(8))}</text>` : '')).join('')}
+      ${ti >= 0 ? `<line class="today" x1="${x(ti)}" x2="${x(ti)}" y1="${T}" y2="${H - B}"/>` : ''}
+      ${planP.length ? `<path class="plan" d="${path(planP)}"/>` : ''}
+      ${actP.length ? `<path class="act" d="${path(actP)}"/>` : ''}
+      ${lastA ? `<circle class="act-pt" cx="${lastA[0]}" cy="${lastA[1]}" r="4"/><text class="lbl" x="${lastA[0] + 6}" y="${lastA[1] + 4}">${rows.filter((r) => r.cumActual != null).at(-1).cumActual}</text>` : ''}
+      ${lastP ? `<text class="lbl muted" x="${Math.min(lastP[0] + 6, W - R + 6)}" y="${lastP[1] + 4}">${rows.filter((r) => r.cumTarget != null).at(-1).cumTarget}</text>` : ''}
+      <line class="hair hidden" y1="${T}" y2="${H - B}"/>
+      <rect class="hit" x="${L}" y="0" width="${W - L - R}" height="${H}"/>
+    </svg>
+    <div class="tip hidden"></div>
+    </div>`;
+  const svg = box.querySelector('svg');
+  const hair = box.querySelector('.hair');
+  const tip = box.querySelector('.tip');
+  const show = (ev) => {
+    const r0 = svg.getBoundingClientRect();
+    const px = ((ev.clientX - r0.left) / r0.width) * W;
+    const i = Math.max(0, Math.min(n - 1, Math.round(((px - L) / (W - L - R)) * (n - 1))));
+    const r = rows[i];
+    hair.setAttribute('x1', x(i));
+    hair.setAttribute('x2', x(i));
+    hair.classList.remove('hidden');
+    tip.innerHTML = `<b>${mdw(r.date, r.holiday)}</b><br>目標累計 ${r.cumTarget ?? '—'}<br>実績累計 ${r.cumActual ?? '—'}${r.diff != null ? `<br>差 <b class="${r.diff >= 0 ? 'ahead' : 'behind'}">${signed(r.diff)}</b>` : ''}`;
+    tip.classList.remove('hidden');
+    const left = (x(i) / W) * r0.width;
+    tip.style.left = `${Math.min(Math.max(left - 60, 0), r0.width - 124)}px`;
+  };
+  const hide = () => { hair.classList.add('hidden'); tip.classList.add('hidden'); };
+  svg.addEventListener('pointermove', show);
+  svg.addEventListener('pointerdown', show);
+  svg.addEventListener('pointerleave', hide);
+}
+
+function openDaySheet(date, days) {
+  const list = doneOn(S.units, date);
+  const byW = {};
+  for (const u of list) byW[u.worker || '未設定'] = (byW[u.worker || '未設定'] || 0) + 1;
+  const p = (S.cfg.plan || []).find((r) => r.d === date);
+  openSheet(`
+    <h3>${mdw(date, p?.h)} ${date === S.today ? '（本日）' : ''}</h3>
+    <dl class="kv">
+      <dt>当日目標（計画）</dt><dd>${p ? p.t : '—'}</dd>
+      <dt>実績（梱包済み）</dt><dd><b>${list.length}</b>台</dd>
+    </dl>
+    <div class="muted small" style="margin:8px 0">${Object.entries(byW).map(([w, c]) => `${esc(w)} ${c}台`).join('　') || '実績なし'}</div>
+    <div class="row wrap">
+      ${list.length ? '<button class="btn" data-a="report">報告文</button><button class="btn" data-a="grid">実績を編集</button>' : ''}
+      <button class="btn" data-a="target">この日の目標・繰越</button>
+    </div>
+    <div class="sheet-actions"><button class="btn" data-close>閉じる</button></div>`, (sh) => {
+    sh.querySelector('[data-close]').onclick = closeSheet;
+    sh.addEventListener('click', (e) => {
+      const a = e.target.closest('[data-a]')?.dataset.a;
+      if (a === 'grid') { closeSheet(); showListWith({ pdate: date }); openGrid(filteredUnits().list); }
+      if (a === 'target') openTargetEditor(date, date === S.today ? S.day || {} : days[date] || {});
+      if (a === 'report') {
+        const text = formatReport(S.units, date, S.cfg);
+        openSheet(`<h3>${esc(date)} の報告文</h3><textarea rows="14" readonly>${esc(text)}</textarea>
+          <div class="sheet-actions"><button class="btn" data-close>閉じる</button><button class="btn" id="hs-share">共有</button><button class="btn primary" id="hs-copy">コピー</button></div>`, (s2) => {
+          s2.querySelector('[data-close]').onclick = closeSheet;
+          $('#hs-copy').onclick = () => copyText(text);
+          $('#hs-share').onclick = () => shareText(text, `キッティング実績 ${date}`);
+        });
+      }
+    });
+  });
+}
+
+function openPlanEditor() {
+  let rows = normalizePlan(S.cfg.plan || []);
+  const renderRows = () => rows.map((r, i) => `<tr data-i="${i}">
+      <td><input type="date" data-k="d" value="${r.d}"></td>
+      <td><input type="number" inputmode="numeric" data-k="t" value="${r.t}"></td>
+      <td><input type="number" inputmode="numeric" data-k="c" value="${r.c ?? ''}" placeholder="${r.cum}"></td>
+      <td><label class="ck"><input type="checkbox" data-k="h" ${r.h ? 'checked' : ''}>祝</label></td>
+      <td><button class="btn sm" data-del>✕</button></td></tr>`).join('');
+  openSheet(`
+    <h3>計画（日別の目標）</h3>
+    <label>総台数<input id="pl-total" type="number" inputmode="numeric" value="${S.cfg.projectTotal || ''}" placeholder="${rows.at(-1)?.cum || Object.keys(S.units).length}"></label>
+    <details ${rows.length ? '' : 'open'}><summary>表を貼り付けて読み込む</summary>
+      <textarea id="pl-text" rows="6" placeholder="10/7(水) 35 120&#10;10/8(木) 55 175&#10;10/12(祝) 33 329&#10;…（日付 当日目標 目標累計）"></textarea>
+      <button class="btn sm" id="pl-parse">読み込む（今の計画を置き換え）</button>
+    </details>
+    <p class="muted small">目標累計を空欄にすると、前の日の累計＋当日目標で自動計算します。</p>
+    <div class="table-wrap"><table class="plan-edit"><thead><tr><th>日付</th><th>当日目標</th><th>目標累計</th><th></th><th></th></tr></thead><tbody id="pl-rows">${renderRows()}</tbody></table></div>
+    <div class="row wrap"><button class="btn sm" id="pl-add">＋ 1日追加</button><button class="btn sm" id="pl-recalc">累計を目標から再計算</button></div>
+    <div class="sheet-actions"><button class="btn danger" id="pl-clear">計画を削除</button><button class="btn" data-close>キャンセル</button><button class="btn primary" id="pl-save">保存</button></div>`, (sh) => {
+    const body = $('#pl-rows');
+    const read = () => {
+      rows = [...body.querySelectorAll('tr')].map((tr) => {
+        const g = (k) => tr.querySelector(`[data-k=${k}]`);
+        const c = g('c').value.trim();
+        return { d: g('d').value, t: Number(g('t').value) || 0, ...(c !== '' ? { c: Number(c) } : {}), ...(g('h').checked ? { h: true } : {}) };
+      }).filter((r) => r.d);
+    };
+    const redraw = () => { rows = normalizePlan(rows); body.innerHTML = renderRows(); };
+    body.addEventListener('click', (e) => { if (e.target.matches('[data-del]')) { read(); rows.splice(Number(e.target.closest('tr').dataset.i), 1); redraw(); } });
+    body.addEventListener('change', () => { read(); redraw(); });
+    $('#pl-parse').onclick = () => {
+      const p = parsePlanText($('#pl-text').value, S.today);
+      if (!p.length) return toast('日付と数字の行が見つかりませんでした', 'warn');
+      rows = p;
+      redraw();
+      if (!$('#pl-total').value && p.at(-1)?.cum) $('#pl-total').value = p.at(-1).cum;
+      toast(`${p.length}日分を読み込みました（保存で確定）`);
+    };
+    $('#pl-add').onclick = () => {
+      read();
+      const last = rows.at(-1)?.d || S.today;
+      rows.push({ d: dateKey(dayBase(last) + 86400000 + 3600000), t: Number(S.cfg.defaultTarget) || 0 });
+      redraw();
+    };
+    $('#pl-recalc').onclick = () => { read(); rows = rows.map(({ c, ...r }) => r); redraw(); };
+    $('#pl-clear').onclick = () => { if (confirm('計画をすべて削除しますか？')) { rows = []; redraw(); } };
+    sh.querySelector('[data-close]').onclick = closeSheet;
+    $('#pl-save').onclick = () => {
+      read();
+      const plan = normalizePlan(rows).map(({ cum, ...r }) => r);
+      const total = Number($('#pl-total').value) || 0;
+      S.store.setConfig({ plan, projectTotal: total });
+      S.cfg.plan = plan;
+      // 本日の目標・繰越にも反映
+      const tp = plan.find((r) => r.d === S.today);
+      if (tp) S.store.setDay(S.today, { target: tp.t, carry: planCarry(S.units, plan, S.today), carryFrom: 'plan' });
+      closeSheet();
+      toast('計画を保存しました');
+      renderHistory();
     };
   });
 }

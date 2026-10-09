@@ -280,3 +280,53 @@ table.grid td.chg input, table.grid td.chg select { border-color: var(--warn); b
 .card.day .day-btns .btn { margin-top: 0; }
 .pdate-l { display: flex; align-items: center; gap: 6px; margin: 0; flex: 1; min-width: 0; white-space: nowrap; }
 .pdate-l input { margin: 0; flex: 1; min-width: 0; }
+
+/* 進捗 */
+.ahead { color: var(--ok); }
+.behind { color: var(--bad); }
+.hero { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.hero-n { font-size: 40px; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.hero-d { font-size: 18px; color: var(--muted); }
+.diff-chip { display: inline-block; font-weight: 700; font-size: 14px; padding: 4px 10px; border-radius: 99px; font-variant-numeric: tabular-nums; }
+.diff-chip.ahead { background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.diff-chip.behind { background: color-mix(in srgb, var(--bad) 14%, transparent); }
+.plan-bar { overflow: visible; }
+.plan-bar em { position: absolute; top: -4px; bottom: -4px; width: 3px; margin-left: -1.5px; background: var(--text); border-radius: 2px; }
+.plan-line { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); cursor: pointer; font-size: 14px; }
+.prog-wrap { max-height: none; }
+table.prog { font-size: 14px; font-variant-numeric: tabular-nums; }
+table.prog th { font-size: 11px; line-height: 1.2; text-align: right; color: var(--muted); font-weight: 600; }
+table.prog th:first-child, table.prog td.d { text-align: left; }
+table.prog td { text-align: right; padding: 8px 6px; }
+table.prog tbody tr { cursor: pointer; }
+table.prog tr.today td { background: color-mix(in srgb, var(--primary) 10%, transparent); }
+table.prog tr.today td.d { box-shadow: inset 3px 0 0 var(--primary); }
+table.prog tr.future td { color: var(--muted); }
+table.prog td.diff { font-weight: 700; }
+.today-tag { display: inline-block; margin-left: 4px; font-size: 10px; font-weight: 700; color: #fff; background: var(--primary); border-radius: 4px; padding: 0 4px; vertical-align: 1px; }
+.burn .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.burn .legend i { display: inline-block; width: 18px; height: 0; vertical-align: middle; margin-right: 4px; border-top: 2px solid; }
+.lg-act { border-color: var(--primary) !important; }
+.lg-plan { border-top-style: dashed !important; border-color: var(--muted) !important; }
+.burn-in { position: relative; }
+.burn svg { width: 100%; height: auto; display: block; touch-action: pan-y; }
+.burn .grid { stroke: var(--line); stroke-width: 1; }
+.burn .goal { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 1 3; }
+.burn .ax { font-size: 9px; fill: var(--muted); }
+.burn .lbl { font-size: 10px; font-weight: 700; fill: var(--text); }
+.burn .lbl.muted { fill: var(--muted); font-weight: 500; }
+.burn .plan { fill: none; stroke: var(--muted); stroke-width: 2; stroke-dasharray: 5 4; }
+.burn .act { fill: none; stroke: var(--primary); stroke-width: 2; stroke-linejoin: round; }
+.burn .act-pt { fill: var(--primary); stroke: var(--card); stroke-width: 2; }
+.burn .today { stroke: var(--primary); stroke-width: 1; opacity: .35; }
+.burn .hair { stroke: var(--text); stroke-width: 1; opacity: .4; }
+.burn .hit { fill: transparent; }
+.burn .tip { position: absolute; top: 0; width: 124px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.12); pointer-events: none; }
+table.plan-edit td { padding: 2px; }
+table.plan-edit input[type=number] { width: 72px; padding: 6px; }
+table.plan-edit input[type=date] { padding: 6px; min-width: 130px; }
+.card-h > span { display: flex; gap: 8px; }
+table.prog td.diff.pending { color: var(--muted); font-weight: 500; font-size: 12px; }
+table.plan-edit input { font-size: 14px; }
+table.plan-edit input[type=date] { min-width: 0; width: 128px; }
+table.plan-edit input[type=number] { width: 62px; }
