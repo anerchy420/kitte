@@ -193,3 +193,18 @@ test('まとめて編集：差分・梱包日の後編集・ステータス変�
   assert.equal(ups3[300].importId, '10/09 07:00 me');
   assert.equal(ups3[271].importId, '10/09 07:00 me');
 });
+
+test('伝票番号のハイフン自動挿入', async () => {
+  const { normSlip, textToTable, rowsToRecords } = await import('../js/logic.js');
+  assert.equal(normSlip('391214189100'), '3912-1418-9100');
+  assert.equal(normSlip('３９１２１４１８９１００'), '3912-1418-9100');
+  assert.equal(normSlip('3912 1418 9100'), '3912-1418-9100');
+  assert.equal(normSlip('3912-14189100'), '3912-1418-9100');
+  assert.equal(normSlip('3912-1418-9100'), '3912-1418-9100');
+  assert.equal(normSlip('39121418910'), '39121418910'); // 11桁はそのまま（形式エラーで警告）
+  assert.equal(normSlip(''), '');
+  const t = textToTable('≪271≫　≪01-0973136≫　≪391214189100≫\n272 01-0972982 3912-1418-9111', 'auto', { pcMin: 160, pcMax: 660 });
+  assert.deepEqual(t.rows.map((r) => r.slice(0, 3)), [['271', '01-0973136', '3912-1418-9100'], ['272', '01-0972982', '3912-1418-9111']]);
+  const b = textToTable('≪271≫　≪01-0973136≫　≪391214189100≫', 'bracket', {});
+  assert.equal(rowsToRecords(b.rows, { pc: 0, yrl: 1, slip: 2 })[0].slip, '3912-1418-9100');
+});

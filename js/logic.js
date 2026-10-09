@@ -43,6 +43,13 @@ function normLine(s) {
     .replace(/(\d)\s*[－ー―‐−–—]\s*(?=\d)/g, '$1-');
 }
 
+// 発送伝票番号：数字12桁（空白・ハイフンの有無は問わない）なら 0000-0000-0000 に整える
+export function normSlip(v) {
+  const s = normNum(v);
+  const d = s.replace(/[\s-]/g, '');
+  return /^\d{12}$/.test(d) ? `${d.slice(0, 4)}-${d.slice(4, 8)}-${d.slice(8)}` : s;
+}
+
 export function parsePc(v) {
   const s = normNum(v).replace(/^0+(?=\d)/, '');
   return /^\d{1,6}$/.test(s) ? Number(s) : null;
@@ -200,8 +207,9 @@ export function textToTable(text, mode, opt = {}, members = []) {
     let cells = [];
     if (mode === 'auto') {
       const yrl = (line.match(/\d{2}-\d{7}(?!\d)/) || [''])[0];
-      const slip = (line.match(/\d{4}-\d{4}-\d{4}(?!\d)/) || [''])[0];
-      const rest = line.replace(yrl || '\u0000', ' ').replace(slip || '\u0000', ' ');
+      const slipRaw = (line.match(/(?<![\d-])\d{4}-?\d{4}-?\d{4}(?![\d-])/) || [''])[0];
+      const slip = slipRaw ? normSlip(slipRaw) : '';
+      const rest = line.replace(yrl || '\u0000', ' ').replace(slipRaw || '\u0000', ' ');
       const nums = (rest.match(/(?<![\d-])\d{1,4}(?![\d-])/g) || []).map(Number);
       const inRange = nums.find((n) => n >= (opt.pcMin ?? 0) && n <= (opt.pcMax ?? 99999));
       const pc = inRange ?? '';
@@ -285,7 +293,7 @@ export function guessMapping(headers, rows, members = [], cfg = DEFAULT_CONFIG) 
   const width = Math.max(headers.length, ...sample.map((r) => r.length));
   const tests = {
     yrl: (v) => YRL_RE.test(normNum(v)),
-    slip: (v) => SLIP_RE.test(normNum(v)),
+    slip: (v) => SLIP_RE.test(normSlip(v)),
     pc: (v) => { const n = parsePc(v); return n != null && n >= cfg.pcMin && n <= cfg.pcMax; },
     worker: (v) => members.includes(String(v).trim()),
     status: (v) => parseStatus(v) != null,
@@ -316,7 +324,7 @@ export function rowsToRecords(rows, mapping) {
     const yrl = get(r, 'yrl');
     if (yrl !== undefined) rec.yrl = normNum(yrl);
     const slip = get(r, 'slip');
-    if (slip !== undefined) rec.slip = normNum(slip);
+    if (slip !== undefined) rec.slip = normSlip(slip);
     const worker = get(r, 'worker');
     if (worker !== undefined) rec.worker = worker;
     const st = get(r, 'status');

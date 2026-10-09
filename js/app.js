@@ -1,12 +1,12 @@
 import {
-  STATUSES, STATUS_LABEL, DEFAULT_CONFIG, YRL_RE, SLIP_RE, isDone, normNum, parsePc, parseStatus,
+  STATUSES, STATUS_LABEL, DEFAULT_CONFIG, YRL_RE, SLIP_RE, isDone, normNum, normSlip, parsePc, parseStatus,
   dateKey, fmtTime, fmtDur, hm, forecast, doneOn, carryFrom, activeMembers,
   textToTable, guessMapping, looksLikeHeader, rowsToRecords, planImport, buildImportUpdates,
   statusSideEffects, buildEditUpdates, formatReport, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 
-const APP_VERSION = '2026-10-09a';
+const APP_VERSION = '2026-10-09b';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -742,7 +742,8 @@ function openGrid(list) {
         tr.querySelectorAll('[data-f]').forEach((el) => {
           const f = el.dataset.f;
           let v = el.value.trim();
-          if (f === 'yrl' || f === 'slip') v = normNum(v);
+          if (f === 'yrl') v = normNum(v);
+          if (f === 'slip') v = normSlip(v);
           const ov = f === 'status' ? u.status : (u[f] || '');
           const changed = v !== ov;
           el.closest('td').classList.toggle('chg', changed);
@@ -757,6 +758,7 @@ function openGrid(list) {
       return edits;
     };
     tbody.addEventListener('input', collect);
+    tbody.addEventListener('focusout', (e) => { if (e.target.dataset.f === 'slip') e.target.value = normSlip(e.target.value); });
     tbody.addEventListener('change', collect);
 
     $('#g-fill').onclick = () => {
@@ -778,7 +780,8 @@ function openGrid(list) {
           v = STATUSES.some((s) => s.key === v) ? v : parseStatus(v) || el.value;
         }
         if (col === 'packedDate') v = normNum(v).replace(/\//g, '-');
-        if (col === 'yrl' || col === 'slip') v = normNum(v);
+        if (col === 'yrl') v = normNum(v);
+        if (col === 'slip') v = normSlip(v);
         if (col === 'worker' && v && !workers.includes(v)) {
           el.insertAdjacentHTML('beforeend', `<option>${esc(v)}</option>`);
         }
@@ -849,7 +852,7 @@ function openUnit(pc) {
     const check = () => {
       const w = [];
       const yrl = normNum($('#u-yrl').value);
-      const slip = normNum($('#u-slip').value);
+      const slip = normSlip($('#u-slip').value);
       const myPc = isNew ? String(parsePc($('#u-pc').value)) : String(u.pc);
       if (yrl && !YRL_RE.test(yrl)) w.push('YRL番号の形式は「01-0000000」です');
       if (slip && !SLIP_RE.test(slip)) w.push('伝票番号の形式は「0000-0000-0000」です');
@@ -868,13 +871,14 @@ function openUnit(pc) {
       box.classList.toggle('hidden', !w.length);
     };
     sh.addEventListener('input', check);
+    $('#u-slip').addEventListener('blur', (e) => { e.target.value = normSlip(e.target.value); });
     check();
     $('#u-save').onclick = () => {
       const p = isNew ? parsePc($('#u-pc').value) : u.pc;
       if (p == null) return toast('PC番号を入力してください', 'warn');
       const cur = S.units[p];
       const now = Date.now();
-      const next = { yrl: normNum($('#u-yrl').value), slip: normNum($('#u-slip').value), worker: $('#u-worker').value, note: $('#u-note').value.trim() };
+      const next = { yrl: normNum($('#u-yrl').value), slip: normSlip($('#u-slip').value), worker: $('#u-worker').value, note: $('#u-note').value.trim() };
       if (status === 'shipped' && !next.slip && cur?.status !== 'shipped' && !confirm('伝票番号が未入力です。発送済みにしますか？')) return;
       const ch = {};
       for (const [k, v] of Object.entries(next)) if ((cur?.[k] || '') !== v) ch[k] = v;
@@ -1072,8 +1076,14 @@ async function readFile(file) {
 function loadSheet() {
   const io = S.io;
   const ws = io.wb.Sheets[io.sheet];
-  const rows = window.XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' })
-    .map((r) => r.map((c) => String(c ?? '').trim()))
+  // 表示文字(raw:false)だと12桁の伝票番号が「3.91214E+11」になるため、値で読んで文字にする
+  const cellText = (c) => {
+    if (c instanceof Date) return dateKey(c.getTime());
+    if (typeof c === 'number') return Number.isInteger(c) ? String(c) : String(+c.toFixed(6));
+    return String(c ?? '').trim();
+  };
+  const rows = window.XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' })
+    .map((r) => r.map(cellText))
     .filter((r) => r.some((c) => c));
   const w = Math.max(0, ...rows.map((r) => r.length));
   rows.forEach((r) => { while (r.length < w) r.push(''); });
