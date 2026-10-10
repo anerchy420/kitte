@@ -366,3 +366,5 @@ label > .row input { margin: 0; }
 .sc-bottom .btn { flex: 1; color: var(--text); }
 .sc-bottom .btn.primary { color: #fff; }
 .sc-torch.on { background: #ffd54a; }
+.sc-target { padding: 6px 14px 10px; font-size: 14px; background: #000; color: #ffd54a; }
+.sc-log .n { font-weight: 700; margin-left: 4px; }

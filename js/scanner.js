@@ -5,8 +5,8 @@ import { parseScan } from './logic.js';
 
 const ZXING_VER = '3.1.5';
 const ZXING_BASE = `https://cdn.jsdelivr.net/npm/zxing-wasm@${ZXING_VER}/dist`;
-const FORMATS_NATIVE = ['codabar', 'code_39', 'code_93', 'code_128', 'itf'];
-const FORMATS_ZXING = ['Codabar', 'Code39', 'Code93', 'Code128', 'ITF'];
+const FORMATS_NATIVE = ['codabar', 'code_39', 'code_128'];
+const FORMATS_ZXING = ['Codabar', 'Code39', 'Code128'];
 const ANGLES = [0, 15, -15, 30, -30, 45, -45]; // ZXing はほぼ水平しか読めないので角度を変えて試す
 
 let zxingP;
@@ -77,11 +77,12 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
  * @param {object} [o.cfg] PC番号の範囲など
  * @param {(p:{kind,value,raw})=>({ok:boolean,msg:string,done?:boolean})} o.onScan
  */
-export function openScanner({ title, hint = '', continuous = false, cfg, onScan, onClose }) {
+export function openScanner({ title, hint = '', target = '', continuous = false, cfg, onScan, onClose }) {
   const el = document.createElement('div');
   el.className = 'scanner';
   el.innerHTML = `
     <div class="sc-top"><b>${esc(title)}</b><button class="sc-x" aria-label="閉じる">✕</button></div>
+    ${target ? `<div class="sc-target">読むバーコード：<b>${esc(target)}</b></div>` : ''}
     <div class="sc-view"><video playsinline muted autoplay></video><div class="sc-guide"><i></i></div><div class="sc-flash"></div></div>
     <div class="sc-msg">${esc(hint || 'バーコードを枠の中に横向きで写してください')}</div>
     <ul class="sc-log"></ul>
@@ -120,11 +121,20 @@ export function openScanner({ title, hint = '', continuous = false, cfg, onScan,
   el.querySelector('.sc-done').onclick = close;
 
   // 読み取った値の処理（同じ値の連続読み取りは無視）
+  const seenNg = new Map(); // 失敗した値 → 表示行（同じ結果は1行にまとめる）
   const handle = (text) => {
     const p = parseScan(text, cfg);
     const now = Date.now();
     if (p.value === last.v && now - last.t < 2500) return false;
     last = { v: p.value, t: now };
+    // 同じ値で失敗し続けている間は、回数だけ増やして音も鳴らさない
+    const prevNg = seenNg.get(p.value);
+    if (prevNg && now - prevNg.t < 15000) {
+      prevNg.t = now;
+      prevNg.n++;
+      prevNg.li.querySelector('.n').textContent = ` ×${prevNg.n}`;
+      return false;
+    }
     let r;
     if (!p.kind) r = { ok: false, msg: `対象外のバーコードです（${p.value}）` };
     else r = onScan(p) || { ok: true, msg: p.value };
@@ -133,7 +143,8 @@ export function openScanner({ title, hint = '', continuous = false, cfg, onScan,
     setTimeout(() => { flash.className = 'sc-flash'; }, 350);
     const li = document.createElement('li');
     li.className = r.ok ? 'ok' : 'ng';
-    li.innerHTML = `${r.ok ? '✅' : '⚠'} ${esc(r.msg)}`;
+    li.innerHTML = `${r.ok ? '✅' : '⚠'} ${esc(r.msg)}<span class="n"></span>`;
+    if (!r.ok) seenNg.set(p.value, { t: now, n: 1, li });
     log.prepend(li);
     while (log.children.length > 20) log.lastChild.remove();
     if (r.ok && (!continuous || r.done)) setTimeout(close, 300);

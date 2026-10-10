@@ -10,7 +10,7 @@ import {
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 import { openScanner } from './scanner.js';
 
-const APP_VERSION = '2026-10-10d';
+const APP_VERSION = '2026-10-10e';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -382,7 +382,8 @@ function renderHome() {
       if (qm === 'ship') {
         openScanner({
           title: '発送登録（連続スキャン）',
-          hint: '伝票のバーコードを枠に入れると、その台を発送済みにします',
+          target: 'ヤマト伝票（下に a3912…a と書いてあるバーコード）',
+          hint: '1箱ずつ伝票を写すと、その台を発送済みにします。順番は自由です',
           continuous: true,
           cfg: S.cfg,
           onScan: (p) => {
@@ -394,6 +395,7 @@ function renderHome() {
       } else {
         openScanner({
           title: 'バーコードでPCを開く',
+          target: 'YRLラベル（01-0000000）か伝票のどちらか一方',
           cfg: S.cfg,
           onScan: (p) => {
             const r = matchNumbers(p.value, S.units, S.cfg)[0];
@@ -996,7 +998,8 @@ function renderMatch() {
     let added = 0;
     openScanner({
       title: '照合する番号をスキャン',
-      hint: '伝票・YRLのバーコードを続けて読み取れます。終わったら「完了」',
+      target: '伝票かYRLラベル（1台につくどちらか1つ）',
+      hint: '続けて読み取れます。順番は自由。終わったら「完了」',
       continuous: true,
       cfg: S.cfg,
       onScan: (p) => {
@@ -1138,6 +1141,7 @@ function openUnit(pc) {
       const kind = b.dataset.scan;
       openScanner({
         title: `${SCAN_KIND_LABEL[kind]}を読み取る`,
+        target: kind === 'yrl' ? 'YRLラベル（01-0000000 のシール）' : 'ヤマト伝票（下に a3912…a と書いてあるバーコード）',
         cfg: S.cfg,
         onScan: (p) => {
           if (p.kind !== kind) return { ok: false, msg: `${p.kind ? SCAN_KIND_LABEL[p.kind] : 'ほかのバーコード'}です（${p.value}）。${SCAN_KIND_LABEL[kind]}を読んでください` };
