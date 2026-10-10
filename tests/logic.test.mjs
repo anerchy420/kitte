@@ -89,7 +89,9 @@ test('報告文：作業者ごと・番号順・梱包済みのみ', () => {
     302: { pc: 302, yrl: 'F', slip: '', worker: '佐藤', status: 'packed', packedDate: 'other' },
   };
   const txt = formatReport(units, 'D', cfg);
-  assert.equal(txt, '【山田】 2台\n≪271≫　≪B≫　≪S1≫\n≪275≫　≪A≫　≪S5≫\n\n【佐藤】 1台\n≪300≫　≪C≫　≪≫\n\n合計 3台');
+  assert.equal(txt, '山田/佐藤\n≪271≫　≪B≫　≪S1≫\n≪275≫　≪A≫　≪S5≫\n≪300≫　≪C≫　≪≫\n合計3台\n\n以上');
+  const byW = formatReport(units, 'D', cfg, { group: 'worker' });
+  assert.equal(byW, '山田\n≪271≫　≪B≫　≪S1≫\n≪275≫　≪A≫　≪S5≫\n合計2台\n\n佐藤\n≪300≫　≪C≫　≪≫\n合計1台\n\n以上');
 });
 
 test('休憩をまたぐ時間計算', () => {
@@ -245,4 +247,57 @@ test('計画：貼り付け・累計・進捗表・遅れ分', async () => {
   assert.equal(s.diff, -60);
   assert.equal(s.planEnd, '2026-10-16');
   assert.equal(s.forecastEnd, '2026-10-15'); // 平均(80+30+50)/3≒53台/日、残り330台
+});
+
+test('報告文：本日の発送分セクション（メール形式）', async () => {
+  const { formatReport } = await import('../js/logic.js');
+  const cfg2 = { ...DEFAULT_CONFIG, members: ['遠藤', '神谷', '福山', '根本', '橋本'] };
+  const units = {
+    313: { pc: 313, yrl: '01-0973294', slip: '3912-1418-9520', worker: '橋本', status: 'packed', packedDate: '2026-10-10' },
+    327: { pc: 327, yrl: '01-0973007', slip: '3912-1418-9660', worker: '遠藤', status: 'packed', packedDate: '2026-10-10' },
+    195: { pc: 195, yrl: '01-0973457', slip: '3912-1418-8341', worker: '神谷', status: 'shipped', packedDate: '2026-10-08', shippedDate: '2026-10-10', shippedAt: 2 },
+    194: { pc: 194, yrl: '01-0973401', slip: '3912-1418-8330', worker: '神谷', status: 'shipped', packedDate: '2026-10-08', shippedDate: '2026-10-10', shippedAt: 1 },
+    200: { pc: 200, yrl: 'x', slip: 'y', status: 'shipped', packedDate: '2026-10-07', shippedDate: '2026-10-09' },
+  };
+  const txt = formatReport(units, '2026-10-10', cfg2, { names: '橋本/遠藤' });
+  assert.equal(txt, `橋本/遠藤
+≪313≫　≪01-0973294≫　≪3912-1418-9520≫
+≪327≫　≪01-0973007≫　≪3912-1418-9660≫
+合計2台
+
+また、本日の発送台数も報告致します。
+≪194≫　≪01-0973401≫　≪3912-1418-8330≫
+≪195≫　≪01-0973457≫　≪3912-1418-8341≫
+合計2台
+
+以上`);
+  assert.ok(!formatReport(units, '2026-10-10', cfg2, { ship: false }).includes('発送'));
+});
+
+test('番号照合：該当・非該当・不一致・重複・補完', async () => {
+  const { matchNumbers } = await import('../js/logic.js');
+  const units = {
+    194: { pc: 194, yrl: '01-0973401', slip: '3912-1418-8330', status: 'packed' },
+    195: { pc: 195, yrl: '01-0973457', slip: '', status: 'packed' },
+    196: { pc: 196, yrl: '01-0973371', slip: '3912-1418-8352', status: 'shipped' },
+  };
+  const r = matchNumbers(`また、本日の発送台数も報告致します。
+≪194≫　≪01-0973401≫　≪3912-1418-8330≫
+≪195≫　≪01-0973457≫　≪3912-1418-8341≫
+391214188352
+≪999≫　≪01-0000000≫　≪3912-0000-0000≫
+≪194≫　≪01-0973401≫　≪3912-1418-8330≫
+合計87台
+以上`, units, DEFAULT_CONFIG);
+  assert.equal(r.length, 5);
+  assert.equal(r[0].by, 'slip');
+  assert.equal(r[0].dup, true);
+  assert.equal(r[1].by, 'yrl');
+  assert.equal(r[1].fill.slip, '3912-1418-8341'); // 伝票が空なので補完対象
+  assert.equal(r[2].unit.pc, 196); // ハイフンなし伝票だけの行
+  assert.equal(r[3].unit, null); // 非該当（999は範囲外だが伝票/YRLでも見つからない）
+  assert.equal(r[4].dup, true);
+  const r2 = matchNumbers('≪194≫　≪01-0973401≫　≪3912-9999-9999≫', units, DEFAULT_CONFIG);
+  assert.equal(r2[0].by, 'yrl');
+  assert.ok(r2[0].mismatch[0].includes('伝票番号が違います'));
 });

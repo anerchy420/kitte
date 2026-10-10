@@ -3,11 +3,11 @@ import {
   dateKey, fmtTime, fmtDur, hm, forecast, doneOn, carryFrom, activeMembers,
   textToTable, guessMapping, looksLikeHeader, rowsToRecords, planImport, buildImportUpdates,
   weekdayLabel, parsePlanText, normalizePlan, progressTable, planSummary, planCarry, dayBase,
-  statusSideEffects, buildEditUpdates, formatReport, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
+  statusSideEffects, buildEditUpdates, formatReport, matchNumbers, shippedOn, shipDateOf, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 
-const APP_VERSION = '2026-10-09d';
+const APP_VERSION = '2026-10-10a';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -187,6 +187,14 @@ async function connect(teamId) {
   S.unsubs.push(S.store.onConfig((c, meta) => {
     if (!c && !meta.fromCache) { S.store.setConfig(DEFAULT_CONFIG); return; }
     if (!c) return;
+    if (c.reportVer !== 2) {
+      // 報告文の書式をメール形式（まとめて見出し・各合計・発送分・以上）へ。手で変えた書式はそのまま
+      const mig = { reportVer: 2 };
+      if (!c.headerTpl || c.headerTpl === '【{worker}】 {count}台') mig.headerTpl = DEFAULT_CONFIG.headerTpl;
+      if (c.footerTpl === undefined || c.footerTpl === '合計 {total}台') mig.footerTpl = DEFAULT_CONFIG.footerTpl;
+      Object.assign(c, mig);
+      S.store.setConfig(mig);
+    }
     S.cfg = { ...DEFAULT_CONFIG, ...c };
     S.cfgLoaded = true;
     if (!$('#login-step2').classList.contains('hidden')) renderNameList();
@@ -328,20 +336,53 @@ function renderHome() {
   if (!root.querySelector('#home-dyn')) {
     root.innerHTML = `
       <div class="card quick">
+        <div class="seg two quick-mode"><button type="button" data-qm="open" class="on">PCを開く</button><button type="button" data-qm="ship">発送登録</button></div>
         <form id="quick-form" class="row">
-          <input id="quick-pc" inputmode="numeric" placeholder="PC番号を入力して開く" autocomplete="off">
-          <button class="btn primary">開く</button>
+          <input id="quick-pc" inputmode="numeric" placeholder="PC番号・YRL・伝票番号で開く" autocomplete="off">
+          <button class="btn primary" id="quick-go">開く</button>
         </form>
+        <p id="quick-help" class="muted small hidden">伝票番号（またはPC・YRL番号）を入れてEnter／スキャンすると、その台を本日付で発送済みにします。</p>
+        <div id="ship-log"></div>
       </div>
       <div id="home-dyn"></div>`;
+    let qm = 'open';
+    root.querySelector('.quick-mode').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-qm]');
+      if (!b) return;
+      qm = b.dataset.qm;
+      root.querySelectorAll('[data-qm]').forEach((x) => x.classList.toggle('on', x === b));
+      $('#quick-pc').placeholder = qm === 'ship' ? '伝票番号を入力／スキャン' : 'PC番号・YRL・伝票番号で開く';
+      $('#quick-go').textContent = qm === 'ship' ? '発送' : '開く';
+      $('#quick-help').classList.toggle('hidden', qm !== 'ship');
+      $('#quick-pc').focus();
+    });
     $('#quick-form').addEventListener('submit', (e) => {
       e.preventDefault();
-      const pc = parsePc($('#quick-pc').value);
-      if (pc == null) return toast('PC番号を入力してください', 'warn');
+      const v = $('#quick-pc').value.trim();
+      if (!v) return;
+      if (qm === 'ship') {
+        quickShip(v);
+        $('#quick-pc').value = '';
+        $('#quick-pc').focus(); // 続けてスキャンできるように
+        return;
+      }
+      const r = matchNumbers(v, S.units, S.cfg)[0];
+      const pc = r?.unit ? r.unit.pc : parsePc(v);
+      if (pc == null) return toast('該当するPCがありません', 'warn');
       openUnit(pc);
       $('#quick-pc').value = '';
       $('#quick-pc').blur();
     });
+    $('#ship-log').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-undo]');
+      if (!b) return;
+      const l = S.shipLog[Number(b.dataset.undo)];
+      if (!l || l.undone) return;
+      changeStatus([String(l.pc)], l.prev);
+      l.undone = true;
+      renderShipLog();
+    });
+    renderShipLog();
     root.addEventListener('click', onHomeClick);
   }
   const dyn = $('#home-dyn');
@@ -392,6 +433,7 @@ function renderHome() {
       </div>
       <div class="progress"><i style="width:${pct}%"></i><span>${pct}%</span></div>
       ${homePlanLine()}
+      <div class="muted small ship-today">本日の発送 <b>${shippedOn(S.units, S.today).length}</b>台</div>
     </div>
 
     <div class="card">
@@ -552,6 +594,7 @@ function renderListShell() {
         <button id="l-grid" class="btn">表で編集</button>
       </div>
     </div>
+    ${L.pcs ? `<div class="filter-chip">照合結果 ${L.pcs.size}台で絞り込み中 <button class="btn sm" id="l-pcs-clear">解除</button></div>` : ''}
     <div id="l-bulk" class="bulk hidden"></div>
     <div id="l-body"></div>`;
   $('#l-worker').value = L.worker;
@@ -561,6 +604,7 @@ function renderListShell() {
   $('#l-sort').addEventListener('change', (e) => { L.sort = e.target.value; renderListBody(); });
   $('#l-select').addEventListener('click', () => { L.select = !L.select; L.selected.clear(); $('#l-select').classList.toggle('on', L.select); renderListBody(); });
   $('#l-add').addEventListener('click', () => openUnit(null));
+  $('#l-pcs-clear')?.addEventListener('click', () => { L.pcs = null; renderListShell(); });
   $('#l-imp').addEventListener('change', (e) => { L.imp = e.target.value; renderListBody(); });
   $('#l-pdate').addEventListener('change', (e) => { L.pdate = e.target.value; renderListBody(); });
   $('#l-grid').addEventListener('click', () => {
@@ -583,6 +627,7 @@ function filteredUnits() {
   if (L.worker === 'me') list = list.filter((u) => u.worker === S.me);
   else if (L.worker === 'none') list = list.filter((u) => !u.worker);
   else if (L.worker.startsWith('w:')) list = list.filter((u) => u.worker === L.worker.slice(2));
+  if (L.pcs) list = list.filter((u) => L.pcs.has(String(u.pc)));
   if (L.imp) list = list.filter((u) => u.importId === L.imp);
   if (L.pdate) list = list.filter((u) => isDone(u.status) && u.packedDate === L.pdate);
   if (q) list = list.filter((u) => [u.pc, u.yrl, u.slip, u.note, u.worker].some((v) => String(v ?? '').toLowerCase().includes(q)));
@@ -829,13 +874,151 @@ function openGrid(list) {
 }
 
 function showListWith(filter) {
-  Object.assign(S.list, { q: '', status: 'all', worker: 'all', imp: '', pdate: '', select: false, limit: 200 }, filter);
+  Object.assign(S.list, { q: '', status: 'all', worker: 'all', imp: '', pdate: '', pcs: null, select: false, limit: 200 }, filter);
   S.list.selected.clear();
   switchTab('list');
 }
 function openImportBatch(id, grid) {
   showListWith({ imp: id });
   if (grid) openGrid(filteredUnits().list);
+}
+
+// ================= 番号照合・発送登録 =================
+// 発送済みにする（date=発送日）。fills = { pc: { slip, yrl } } 空欄の補完
+function shipUnits(pcs, date, fills = {}) {
+  const now = Date.now();
+  const ups = {};
+  const logs = [];
+  for (const pc of pcs) {
+    const cur = S.units[pc];
+    if (!cur) continue;
+    const ch = { ...(fills[pc] || {}) };
+    if (cur.status !== 'shipped') {
+      Object.assign(ch, { status: 'shipped' }, statusSideEffects(cur, 'shipped', date, cur.worker || S.me));
+      logs.push({ pc: Number(pc) || pc, from: cur.status, to: 'shipped' });
+    }
+    if (Object.keys(ch).length) ups[pc] = { ...ch, updatedAt: now, updatedBy: S.me };
+  }
+  if (!Object.keys(ups).length) return 0;
+  S.store.setUnits(ups);
+  S.store.addLog(S.today, logEntries(logs.length > 10 ? [{ msg: `${logs.length}台を発送済みに（${date}）` }] : logs));
+  return logs.length;
+}
+
+const matchLine = (r) => `≪${r.pc ?? ''}≫　≪${r.yrl || ''}≫　≪${r.slip || ''}≫`;
+function renderMatch() {
+  const box = $('#mt-box');
+  if (!box) return;
+  const M = (S.match ||= { text: '', date: S.today, fill: true, res: null });
+  const res = M.res;
+  let body = '';
+  if (res) {
+    const hit = res.filter((r) => r.unit);
+    const miss = res.filter((r) => !r.unit);
+    const warn = hit.filter((r) => r.mismatch.length || r.dup);
+    const toShip = [...new Set(hit.filter((r) => r.unit.status !== 'shipped').map((r) => String(r.unit.pc)))];
+    const already = [...new Set(hit.filter((r) => r.unit.status === 'shipped').map((r) => String(r.unit.pc)))];
+    const listed = new Set(hit.map((r) => String(r.unit.pc)));
+    const packedLeft = Object.values(S.units).filter((u) => u.status === 'packed' && !listed.has(String(u.pc))).sort((a, b) => a.pc - b.pc);
+    const st = (u) => statusBadge(u.status) + (u.status === 'shipped' && shipDateOf(u) ? ` <small class="muted">${esc(shipDateOf(u).slice(5))}</small>` : '');
+    body = `
+      <div class="chips static">
+        <span class="chip a-new">該当 <b>${hit.length}</b></span>
+        <span class="chip a-error">非該当 <b>${miss.length}</b></span>
+        ${warn.length ? `<span class="chip warn">要確認 <b>${warn.length}</b></span>` : ''}
+        <span class="chip">発送済みにできる <b>${toShip.length}</b></span>
+        ${already.length ? `<span class="chip">すでに発送済み <b>${already.length}</b></span>` : ''}
+      </div>
+      <div class="row wrap mt-actions">
+        <label class="pdate-l">発送日<input type="date" id="mt-date" value="${M.date}"></label>
+        <button class="btn primary" id="mt-ship" ${toShip.length ? '' : 'disabled'}>該当${toShip.length}台を発送済みにする</button>
+      </div>
+      <label class="check-l"><input type="checkbox" id="mt-fill" ${M.fill ? 'checked' : ''}> 登録が空欄の伝票番号・YRL番号は貼り付けた値で埋める</label>
+      ${miss.length ? `<h3 class="sub">非該当（登録なし） ${miss.length}件 <button class="btn sm" data-copy="miss">コピー</button></h3>
+        <div class="table-wrap"><table><tr><th>PC</th><th>YRL</th><th>伝票</th></tr>${miss.map((r) => `<tr class="a-error"><td>${esc(r.pc ?? '')}</td><td>${esc(r.yrl)}</td><td>${esc(r.slip)}</td></tr>`).join('')}</table></div>` : ''}
+      <h3 class="sub">該当 ${hit.length}件 <button class="btn sm" data-copy="hit">コピー</button> <button class="btn sm" data-showlist>一覧で表示</button></h3>
+      ${hit.length ? `<div class="table-wrap"><table class="plan"><tr><th>PC</th><th>状態</th><th>照合</th></tr>${hit.map((r) => `<tr class="${r.mismatch.length || r.dup ? 'a-conflict' : ''}" data-pc="${esc(r.unit.pc)}">
+        <td><b>${esc(r.unit.pc)}</b></td><td>${st(r.unit)}</td>
+        <td>${{ slip: '伝票', yrl: 'YRL', pc: 'PC' }[r.by]}で一致${Object.keys(r.fill).length ? ' <small class="muted">（空欄を補完）</small>' : ''}${r.mismatch.map((w) => `<div class="w">⚠ ${esc(w)}</div>`).join('')}${r.dup ? '<div class="w">⚠ 同じPCが2回以上あります</div>' : ''}</td></tr>`).join('')}</table></div>` : '<p class="muted">なし</p>'}
+      <details><summary>梱包済みで今回のリストにないもの（未発送） ${packedLeft.length}台</summary>
+        <div class="row wrap"><button class="btn sm" data-copy="left">コピー</button></div>
+        <div class="table-wrap"><table>${packedLeft.map((u) => `<tr><td>${esc(u.pc)}</td><td>${esc(u.yrl || '')}</td><td>${esc(u.slip || '')}</td><td>${esc(u.worker || '')}</td></tr>`).join('')}</table></div>
+      </details>`;
+    M.view = { hit, miss, toShip, packedLeft };
+  }
+  box.innerHTML = `
+    <div class="card-h"><h2>番号で照合・発送登録</h2>${res ? '<button class="link" id="mt-clear">クリア</button>' : ''}</div>
+    <textarea id="mt-text" rows="${res ? 3 : 6}" placeholder="発送する分の報告文や番号を貼り付け（伝票番号・YRL番号・PC番号のどれでも。1行に1台）">${esc(M.text)}</textarea>
+    <button class="btn block" id="mt-go">照合する</button>
+    ${body}`;
+  $('#mt-text').oninput = (e) => { M.text = e.target.value; };
+  $('#mt-go').onclick = () => {
+    M.text = $('#mt-text').value;
+    if (!M.text.trim()) return toast('番号を貼り付けてください', 'warn');
+    M.res = matchNumbers(M.text, S.units, S.cfg);
+    if (!M.res.length) toast('番号を読み取れませんでした', 'warn');
+    renderMatch();
+  };
+  $('#mt-clear')?.addEventListener('click', () => { S.match = null; renderMatch(); });
+  if (!res) return;
+  $('#mt-date').onchange = (e) => { M.date = e.target.value || S.today; };
+  $('#mt-fill').onchange = (e) => { M.fill = e.target.checked; };
+  $('#mt-ship').onclick = () => {
+    const { toShip, hit } = M.view;
+    const warnN = hit.filter((r) => r.mismatch.length).length;
+    if (!confirm(`${toShip.length}台を発送済み（発送日 ${M.date}）にしますか？${warnN ? `\n※番号の不一致が${warnN}件あります` : ''}`)) return;
+    const fills = {};
+    if (M.fill) for (const r of hit) if (Object.keys(r.fill).length) fills[r.unit.pc] = { ...(fills[r.unit.pc] || {}), ...r.fill };
+    const pcs = [...new Set([...toShip, ...Object.keys(fills)])];
+    const n = shipUnits(pcs, M.date, fills);
+    toast(`${n}台を発送済みにしました`);
+    M.res = matchNumbers(M.text, S.units, S.cfg);
+    setTimeout(renderMatch, 50);
+  };
+  box.querySelectorAll('[data-copy]').forEach((b) => (b.onclick = () => {
+    const { hit, miss, packedLeft } = M.view;
+    const k = b.dataset.copy;
+    const text = k === 'miss' ? miss.map(matchLine).join('\n')
+      : k === 'hit' ? hit.map((r) => `≪${r.unit.pc}≫　≪${r.unit.yrl || ''}≫　≪${r.unit.slip || ''}≫`).join('\n')
+        : packedLeft.map((u) => `≪${u.pc}≫　≪${u.yrl || ''}≫　≪${u.slip || ''}≫`).join('\n');
+    copyText(text);
+  }));
+  box.querySelector('[data-showlist]')?.addEventListener('click', () => {
+    showListWith({ pcs: new Set(M.view.hit.map((r) => String(r.unit.pc))) });
+  });
+  box.querySelector('table.plan')?.addEventListener('click', (e) => {
+    const tr = e.target.closest('[data-pc]');
+    if (tr) openUnit(tr.dataset.pc);
+  });
+}
+
+// ホームの「発送登録」：伝票番号などを入れる（スキャンする）たびに発送済みに
+function quickShip(raw) {
+  const res = matchNumbers(raw, S.units, S.cfg);
+  const log = (S.shipLog ||= []);
+  if (!res.length) {
+    log.unshift({ t: Date.now(), text: raw, ok: false, msg: '番号を読み取れません' });
+  } else {
+    for (const r of res) {
+      if (!r.unit) { log.unshift({ t: Date.now(), text: r.slip || r.yrl || (r.pc != null ? `PC${r.pc}` : raw), ok: false, msg: '該当なし' }); continue; }
+      const u = r.unit;
+      if (u.status === 'shipped') { log.unshift({ t: Date.now(), pc: u.pc, ok: false, msg: `すでに発送済み（${(shipDateOf(u) || '').slice(5)}）` }); continue; }
+      const prev = u.status;
+      shipUnits([String(u.pc)], S.today, Object.keys(r.fill).length ? { [u.pc]: r.fill } : {});
+      log.unshift({ t: Date.now(), pc: u.pc, ok: true, prev, msg: r.mismatch.join(' / ') });
+    }
+  }
+  log.splice(30);
+  renderShipLog();
+}
+function renderShipLog() {
+  const box = $('#ship-log');
+  if (!box) return;
+  const log = S.shipLog || [];
+  const n = log.filter((l) => l.ok).length;
+  box.innerHTML = log.length ? `<div class="muted small">この画面で発送登録 ${n}台</div><ul class="ship-log">${log.map((l, i) => `<li class="${l.ok ? 'ok' : 'ng'}">
+    <span>${l.ok ? '✅' : '⚠'} ${l.pc != null ? `PC<b>${esc(l.pc)}</b>` : esc(l.text)} <small>${l.ok ? '発送済みにしました' : esc(l.msg)}</small>${l.ok && l.msg ? `<div class="w">⚠ ${esc(l.msg)}</div>` : ''}</span>
+    ${l.ok && !l.undone ? `<button class="btn sm" data-undo="${i}">取消</button>` : l.undone ? '<small class="muted">取消済</small>' : ''}</li>`).join('')}</ul>` : '';
 }
 
 // ================= 1台の編集 =================
@@ -854,6 +1037,7 @@ function openUnit(pc) {
     <div class="lbl">ステータス</div>
     <div class="seg" id="u-status">${STATUSES.map((s) => `<button type="button" class="st-${s.key} ${s.key === u.status ? 'on' : ''}" data-s="${s.key}">${s.label}</button>`).join('')}</div>
     <label id="u-pdate-l" class="${isDone(u.status) ? '' : 'hidden'}">梱包日（実績の日付）<input id="u-pdate" type="date" value="${esc(u.packedDate || S.today)}"></label>
+    <label id="u-sdate-l" class="${u.status === 'shipped' ? '' : 'hidden'}">発送日<input id="u-sdate" type="date" value="${esc(shipDateOf(u) || S.today)}"></label>
     <label>備考<textarea id="u-note" rows="2">${esc(u.note)}</textarea></label>
     ${!isNew ? `<p class="muted small">${u.packedDate ? `梱包日 ${esc(u.packedDate)}　` : ''}${u.updatedAt ? `最終更新 ${dateKey(u.updatedAt)} ${fmtTime(u.updatedAt)} ${esc(u.updatedBy || '')}` : ''}</p>` : ''}
     <div class="sheet-actions">
@@ -870,6 +1054,7 @@ function openUnit(pc) {
       $('#u-status').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
       if (status !== 'todo' && !$('#u-worker').value && S.me) $('#u-worker').value = S.me;
       $('#u-pdate-l').classList.toggle('hidden', !isDone(status));
+      $('#u-sdate-l').classList.toggle('hidden', status !== 'shipped');
     });
     const check = () => {
       const w = [];
@@ -907,6 +1092,8 @@ function openUnit(pc) {
       const pdate = $('#u-pdate').value || S.today;
       if (!cur || cur.status !== status) Object.assign(ch, { status }, statusSideEffects(cur, status, pdate, ch.worker ?? cur?.worker ?? S.me));
       if (ch.worker === undefined && !cur && status !== 'todo') ch.worker = next.worker;
+      const sdate = $('#u-sdate').value || S.today;
+      if (status === 'shipped' && sdate !== (ch.shippedDate ?? (cur ? shipDateOf(cur) : null))) ch.shippedDate = sdate;
       let dateMoved = false;
       if (isDone(status) && pdate !== (ch.packedDate ?? cur?.packedDate)) { ch.packedDate = pdate; dateMoved = !!cur?.packedDate; }
       if (!Object.keys(ch).length) { closeSheet(); return; }
@@ -941,6 +1128,29 @@ function renderIO() {
   const io = S.io;
   const root = $('#tab-io');
   root.innerHTML = `
+    <div class="card" id="mt-box"></div>
+
+    <div class="card">
+      <div class="card-h"><h2>報告文（メール用）</h2></div>
+      <div class="row">
+        <label class="grow">日付<input id="rp-date" type="date" value="${io.reportDate}"></label>
+        <label class="grow">作業者<select id="rp-worker"><option value="">全員</option>${allWorkers().map((w) => `<option ${w === io.reportWorker ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select></label>
+      </div>
+      <div class="row wrap">
+        <label class="grow">梱包実績のまとめ方<select id="rp-group"><option value="together">1つにまとめる</option><option value="worker">作業者ごと</option></select></label>
+        <label class="grow">見出しの名前<input id="rp-names" placeholder="自動（例：橋本/遠藤）" value="${esc(io.reportNames || '')}"></label>
+      </div>
+      <label class="check-l"><input type="checkbox" id="rp-ship" ${(io.reportShip ?? S.cfg.shipInclude) ? 'checked' : ''}> 本日の発送分も入れる</label>
+      <div id="rp-count" class="muted small"></div>
+      <textarea id="rp-text" rows="12"></textarea>
+      <div class="row wrap">
+        <button class="btn primary" id="rp-copy">コピー</button>
+        <button class="btn" id="rp-share">共有/メール</button>
+        <button class="btn" id="rp-dl">.txt保存</button>
+      </div>
+      <p class="muted small">梱包実績＝その日に梱包済み（発送済み含む）になったPC、発送分＝その日に発送済みにしたPC。どちらもPC番号順。送る前にこの欄で直接書き換えられます。書式は設定で変更できます。</p>
+    </div>
+
     <div class="card">
       <div class="card-h"><h2>取り込み</h2></div>
       <div class="seg two" id="io-src">
@@ -971,21 +1181,6 @@ function renderIO() {
       <div id="io-plan"></div>
     </div>
 
-    <div class="card">
-      <div class="card-h"><h2>報告文（メール用）</h2></div>
-      <div class="row">
-        <label class="grow">日付<input id="rp-date" type="date" value="${io.reportDate}"></label>
-        <label class="grow">作業者<select id="rp-worker"><option value="">全員</option>${allWorkers().map((w) => `<option ${w === io.reportWorker ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select></label>
-      </div>
-      <textarea id="rp-text" rows="10" readonly></textarea>
-      <div class="row wrap">
-        <button class="btn primary" id="rp-copy">コピー</button>
-        <button class="btn" id="rp-share">共有/メール</button>
-        <button class="btn" id="rp-dl">.txt保存</button>
-      </div>
-      <p class="muted small">対象：その日に梱包済み（発送済み含む）になったPC。作業者ごと・PC番号順。書式は設定で変更できます。</p>
-    </div>
-
     <div class="card" id="ex-box"></div>
 `;
 
@@ -1005,14 +1200,21 @@ function renderIO() {
   $('#io-file')?.addEventListener('change', (e) => readFile(e.target.files[0]));
   $('#io-sheet')?.addEventListener('change', (e) => { io.sheet = e.target.value; loadSheet(); });
 
+  $('#rp-group').value = io.reportGroup || S.cfg.reportGroup || 'together';
   const upd = () => {
     io.reportDate = $('#rp-date').value || S.today;
     io.reportWorker = $('#rp-worker').value;
+    io.reportGroup = $('#rp-group').value;
+    io.reportNames = $('#rp-names').value.trim();
+    io.reportShip = $('#rp-ship').checked;
     $('#rp-text').value = reportText();
+    const pk = doneOn(S.units, io.reportDate).filter((u) => !io.reportWorker || u.worker === io.reportWorker).length;
+    $('#rp-count').textContent = `梱包実績 ${pk}台 ／ 発送 ${shippedOn(S.units, io.reportDate).length}台`;
   };
-  $('#rp-date').addEventListener('change', upd);
-  $('#rp-worker').addEventListener('change', upd);
+  ['rp-date', 'rp-worker', 'rp-group', 'rp-ship'].forEach((id) => $('#' + id).addEventListener('change', upd));
+  $('#rp-names').addEventListener('input', upd);
   upd();
+  renderMatch();
   $('#rp-copy').onclick = () => copyText($('#rp-text').value);
   $('#rp-share').onclick = () => shareText($('#rp-text').value, `キッティング実績 ${io.reportDate}`);
   $('#rp-dl').onclick = () => download(`実績_${io.reportDate}${io.reportWorker ? '_' + io.reportWorker : ''}.txt`, $('#rp-text').value, 'text/plain');
@@ -1020,8 +1222,9 @@ function renderIO() {
   if (io.table) { renderMapping(); renderPlan(); }
 }
 function reportText() {
-  const t = formatReport(S.units, S.io.reportDate, S.cfg, { worker: S.io.reportWorker });
-  return doneOn(S.units, S.io.reportDate).length ? t : '（この日の梱包済み実績はありません）';
+  const io = S.io;
+  const t = formatReport(S.units, io.reportDate, S.cfg, { worker: io.reportWorker, group: io.reportGroup, names: io.reportNames || undefined, ship: io.reportShip });
+  return t || '（この日の梱包済み・発送の実績はありません）';
 }
 
 function modeOptions() {
@@ -1578,9 +1781,13 @@ const CFG_FIELDS = [
   ['breaks', '休憩（例: 10:00-10:10, 12:00-13:00）', 'text'],
   ['pcMin', 'PC番号の最小', 'number'],
   ['pcMax', 'PC番号の最大', 'number'],
-  ['headerTpl', '報告：作業者見出し {worker} {count}', 'text'],
+  ['headerTpl', '報告：見出し {worker}=作業者名 {count}=台数', 'text'],
   ['lineTpl', '報告：1行の書式 {pc} {yrl} {slip}', 'text'],
-  ['footerTpl', '報告：最後の行 {total}（空欄で無し）', 'text'],
+  ['groupFooterTpl', '報告：見出しごとの合計 {count}（空欄で無し）', 'text'],
+  ['footerTpl', '報告：梱包実績の総合計 {total}（空欄で無し）', 'text'],
+  ['shipHeaderTpl', '報告：発送分の前置き', 'text'],
+  ['shipFooterTpl', '報告：発送分の合計 {count}', 'text'],
+  ['endTpl', '報告：最後の行（例：以上）', 'text'],
 ];
 function renderSettings() {
   const c = S.cfg;

@@ -330,3 +330,15 @@ table.prog td.diff.pending { color: var(--muted); font-weight: 500; font-size: 1
 table.plan-edit input { font-size: 14px; }
 table.plan-edit input[type=date] { min-width: 0; width: 128px; }
 table.plan-edit input[type=number] { width: 62px; }
+
+/* 照合・発送登録 */
+.quick-mode { margin-bottom: 8px; }
+.ship-log { list-style: none; margin: 6px 0 0; padding: 0; max-height: 220px; overflow-y: auto; }
+.ship-log li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 4px; border-bottom: 1px dashed var(--line); font-size: 14px; }
+.ship-log li.ng { color: var(--bad); }
+.ship-log .w { color: var(--warn); font-size: 12px; }
+.mt-actions { margin: 10px 0 4px; }
+.mt-actions .pdate-l { flex: 1 1 200px; }
+.filter-chip { display: flex; justify-content: space-between; align-items: center; background: color-mix(in srgb, var(--primary) 10%, transparent); border-radius: 10px; padding: 6px 10px; margin-bottom: 8px; font-size: 14px; }
+.ship-today { margin-top: 6px; text-align: right; }
+h3.sub .btn { margin-left: 6px; vertical-align: middle; }

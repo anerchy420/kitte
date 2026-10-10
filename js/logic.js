@@ -23,9 +23,18 @@ export const DEFAULT_CONFIG = {
   breaks: '12:00-13:00',
   pcMin: 160,
   pcMax: 660,
-  headerTpl: '【{worker}】 {count}台',
+  // 報告文（メール）
+  reportVer: 2,
+  reportGroup: 'together', // together: 1つにまとめる（見出し=作業者を/区切り） | worker: 作業者ごと
+  headerTpl: '{worker}',
   lineTpl: '≪{pc}≫　≪{yrl}≫　≪{slip}≫',
-  footerTpl: '合計 {total}台',
+  groupFooterTpl: '合計{count}台',
+  footerTpl: '', // 梱包実績の総合計（空欄で無し）
+  shipInclude: true,
+  shipHeaderTpl: 'また、本日の発送台数も報告致します。',
+  shipFooterTpl: '合計{count}台',
+  shipSort: 'pc', // pc | time（発送登録した順）
+  endTpl: '以上',
 };
 
 export const YRL_RE = /^\d{2}-\d{7}$/;
@@ -405,6 +414,7 @@ export function buildEditUpdates(edits, units, today, now, me) {
     if (e.status && e.status !== cur.status) {
       const w = 'worker' in ch ? ch.worker : cur.worker || me;
       Object.assign(ch, { status: e.status }, statusSideEffects(cur, e.status, e.packedDate || today, w));
+      if (e.status === 'shipped') ch.shippedDate = today; // 発送日は本日（梱包日の欄とは別）
       if ('worker' in e) ch.worker = e.worker || '';
       logs.push({ pc: Number(pc) || pc, from: cur.status, to: e.status });
     }
@@ -427,7 +437,8 @@ export function statusSideEffects(cur, status, date, worker) {
     ch.packedDate = null;
     ch.packedAt = null;
   }
-  if (status === 'shipped' && cur?.status !== 'shipped') ch.shippedAt = Date.now();
+  if (status === 'shipped' && cur?.status !== 'shipped') { ch.shippedAt = Date.now(); ch.shippedDate = date; }
+  if (status !== 'shipped' && cur?.status === 'shipped') { ch.shippedAt = null; ch.shippedDate = null; }
   if (status !== 'todo' && !cur?.worker && worker) ch.worker = worker;
   return ch;
 }
@@ -436,26 +447,77 @@ export function statusSideEffects(cur, status, date, worker) {
 const fill = (tpl, vars) => tpl.replace(/\{(\w+)\}/g, (_, k) => (vars[k] ?? ''));
 const byPc = (a, b) => Number(a.pc) - Number(b.pc) || String(a.pc).localeCompare(String(b.pc));
 
+export const shipDateOf = (u) => (u.status === 'shipped' ? u.shippedDate || (u.shippedAt ? dateKey(u.shippedAt) : null) : null);
+export function shippedOn(units, date) {
+  return Object.values(units).filter((u) => shipDateOf(u) === date);
+}
+
+// 報告文。opts: { worker, group, ship, names }（未指定は cfg の設定）
 export function formatReport(units, date, cfg, opts = {}) {
+  const c = { ...DEFAULT_CONFIG, ...cfg };
+  const line = (u) => fill(c.lineTpl, { pc: u.pc, yrl: u.yrl || '', slip: u.slip || '', worker: u.worker || '', status: STATUS_LABEL[u.status] });
   const list = doneOn(units, date).filter((u) => !opts.worker || (u.worker || '') === opts.worker);
+  const members = c.members || [];
   const groups = new Map();
   for (const u of list) {
     const w = u.worker || '未設定';
     if (!groups.has(w)) groups.set(w, []);
     groups.get(w).push(u);
   }
-  const order = [...(cfg.members || []), ...[...groups.keys()].filter((k) => !(cfg.members || []).includes(k))];
-  const parts = [];
-  for (const w of order) {
-    const g = groups.get(w);
-    if (!g) continue;
+  const order = [...members, ...[...groups.keys()].filter((k) => !members.includes(k))].filter((w) => groups.has(w));
+  const block = (name, g) => {
     g.sort(byPc);
-    const lines = [fill(cfg.headerTpl ?? '', { worker: w, count: g.length, date })];
-    for (const u of g) lines.push(fill(cfg.lineTpl, { pc: u.pc, yrl: u.yrl || '', slip: u.slip || '', worker: w, status: STATUS_LABEL[u.status] }));
-    parts.push(lines.filter((l, i) => i > 0 || l.trim()).join('\n'));
+    return [fill(c.headerTpl || '', { worker: name, count: g.length, date }), ...g.map(line), fill(c.groupFooterTpl || '', { count: g.length, worker: name, date })]
+      .filter((l) => l.trim()).join('\n');
+  };
+  const parts = [];
+  if (list.length) {
+    if ((opts.group ?? c.reportGroup) === 'worker') for (const w of order) parts.push(block(w, groups.get(w)));
+    else parts.push(block(opts.names || order.join('/'), [...list]));
+    if (c.footerTpl) parts.push(fill(c.footerTpl, { total: list.length, count: list.length, date }));
   }
-  const footer = cfg.footerTpl ? fill(cfg.footerTpl, { total: list.length, date }) : '';
-  return [...parts, footer].filter(Boolean).join('\n\n');
+  if (opts.ship ?? c.shipInclude) {
+    const sh = shippedOn(units, date);
+    if (sh.length) {
+      sh.sort((c.shipSort === 'time') ? (a, b) => (a.shippedAt || 0) - (b.shippedAt || 0) || byPc(a, b) : byPc);
+      parts.push([fill(c.shipHeaderTpl || '', { count: sh.length, date }), ...sh.map(line), fill(c.shipFooterTpl || '', { count: sh.length, date })]
+        .filter((l) => l.trim()).join('\n'));
+    }
+  }
+  if (parts.length && c.endTpl) parts.push(c.endTpl);
+  return parts.join('\n\n');
+}
+
+// ---------- 番号照合 ----------
+// 貼り付けた文字列の各行から PC/YRL/伝票 を読み取り、登録済みのPCと突き合わせる
+export function matchNumbers(text, units, cfg = DEFAULT_CONFIG) {
+  const bySlip = new Map();
+  const byYrl = new Map();
+  for (const u of Object.values(units)) {
+    if (u.slip) bySlip.set(u.slip, u);
+    if (u.yrl) byYrl.set(u.yrl, u);
+  }
+  const t = textToTable(text, 'auto', { pcMin: cfg.pcMin, pcMax: cfg.pcMax });
+  const seen = new Map();
+  return t.rows.map(([pcS, yrl, slip]) => {
+    const pc = pcS ? Number(pcS) : null;
+    let unit = null;
+    let by = null;
+    if (slip && bySlip.has(slip)) { unit = bySlip.get(slip); by = 'slip'; }
+    else if (yrl && byYrl.has(yrl)) { unit = byYrl.get(yrl); by = 'yrl'; }
+    else if (pc != null && units[pc]) { unit = units[pc]; by = 'pc'; }
+    const r = { pc, yrl, slip, unit, by, mismatch: [], fill: {}, dup: false };
+    if (unit) {
+      if (pc != null && Number(unit.pc) !== pc) r.mismatch.push(`PC番号が違います（登録はPC${unit.pc}）`);
+      if (yrl && unit.yrl && unit.yrl !== yrl) r.mismatch.push(`YRL番号が違います（登録は${unit.yrl}）`);
+      if (slip && unit.slip && unit.slip !== slip) r.mismatch.push(`伝票番号が違います（登録は${unit.slip}）`);
+      if (yrl && !unit.yrl) r.fill.yrl = yrl;
+      if (slip && !unit.slip) r.fill.slip = slip;
+      const k = String(unit.pc);
+      if (seen.has(k)) { r.dup = true; seen.get(k).dup = true; } else seen.set(k, r);
+    }
+    return r;
+  });
 }
 
 const fmtDT = (ms) => (ms ? `${dateKey(ms)} ${fmtTime(ms)}` : '');
@@ -467,6 +529,7 @@ export const EXPORT_COLUMNS = [
   { key: 'status', label: 'ステータス', w: 10, get: (u) => STATUS_LABEL[u.status] || '' },
   { key: 'packedDate', label: '梱包日', w: 11, get: (u) => u.packedDate || '' },
   { key: 'packedAt', label: '梱包日時', w: 17, get: (u) => fmtDT(u.packedAt) },
+  { key: 'shippedDate', label: '発送日', w: 11, get: (u) => shipDateOf(u) || '' },
   { key: 'shippedAt', label: '発送日時', w: 17, get: (u) => (u.status === 'shipped' ? fmtDT(u.shippedAt) : '') },
   { key: 'updatedAt', label: '更新日時', w: 17, get: (u) => fmtDT(u.updatedAt) },
   { key: 'updatedBy', label: '更新者', w: 10, get: (u) => u.updatedBy || '' },
