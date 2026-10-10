@@ -8,7 +8,7 @@ import {
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 
-const APP_VERSION = '2026-10-10b';
+const APP_VERSION = '2026-10-10c';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -1139,8 +1139,8 @@ function renderIO() {
         <label class="grow">作業者<select id="rp-worker"><option value="">全員</option>${allWorkers().map((w) => `<option ${w === io.reportWorker ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select></label>
       </div>
       <div class="row wrap">
-        <label class="grow">梱包実績のまとめ方<select id="rp-group"><option value="together">1つにまとめる</option><option value="worker">作業者ごと</option></select></label>
-        <label class="grow">見出しの名前<input id="rp-names" placeholder="自動（例：橋本/遠藤）" value="${esc(io.reportNames || '')}"></label>
+        <label class="grow">梱包実績のまとめ方<select id="rp-group"><option value="worker">作業者ごと</option><option value="together">1つにまとめる</option></select></label>
+        <label class="grow" id="rp-names-l">見出しの名前<input id="rp-names" placeholder="自動（例：橋本/遠藤）" value="${esc(io.reportNames || '')}"></label>
       </div>
       <label class="check-l"><input type="checkbox" id="rp-ship" ${(io.reportShip ?? S.cfg.shipInclude) ? 'checked' : ''}> 本日の発送分も入れる</label>
       <div id="rp-count" class="muted small"></div>
@@ -1209,6 +1209,7 @@ function renderIO() {
     io.reportGroup = $('#rp-group').value;
     io.reportNames = $('#rp-names').value.trim();
     io.reportShip = $('#rp-ship').checked;
+    $('#rp-names-l').classList.toggle('hidden', io.reportGroup !== 'together');
     $('#rp-text').value = reportText();
     const pk = doneOn(S.units, io.reportDate).filter((u) => !io.reportWorker || u.worker === io.reportWorker).length;
     $('#rp-count').textContent = `梱包実績 ${pk}台 ／ 発送 ${shippedOn(S.units, io.reportDate).length}台`;

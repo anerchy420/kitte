@@ -88,9 +88,9 @@ test('報告文：作業者ごと・番号順・梱包済みのみ', () => {
     301: { pc: 301, yrl: 'E', slip: '', worker: '佐藤', status: 'wip', packedDate: null },
     302: { pc: 302, yrl: 'F', slip: '', worker: '佐藤', status: 'packed', packedDate: 'other' },
   };
-  const txt = formatReport(units, 'D', cfg);
+  const txt = formatReport(units, 'D', cfg, { group: 'together' });
   assert.equal(txt, '山田/佐藤\n≪271≫　≪B≫　≪S1≫\n≪275≫　≪A≫　≪S5≫\n≪300≫　≪C≫　≪≫\n合計3台\n\n以上');
-  const byW = formatReport(units, 'D', cfg, { group: 'worker' });
+  const byW = formatReport(units, 'D', cfg); // 既定は作業者ごと
   assert.equal(byW, '山田\n≪271≫　≪B≫　≪S1≫\n≪275≫　≪A≫　≪S5≫\n合計2台\n\n佐藤\n≪300≫　≪C≫　≪≫\n合計1台\n\n以上');
 });
 
@@ -259,7 +259,7 @@ test('報告文：本日の発送分セクション（メール形式）', async
     194: { pc: 194, yrl: '01-0973401', slip: '3912-1418-8330', worker: '神谷', status: 'shipped', packedDate: '2026-10-08', shippedDate: '2026-10-10', shippedAt: 1 },
     200: { pc: 200, yrl: 'x', slip: 'y', status: 'shipped', packedDate: '2026-10-07', shippedDate: '2026-10-09' },
   };
-  const txt = formatReport(units, '2026-10-10', cfg2, { names: '橋本/遠藤' });
+  const txt = formatReport(units, '2026-10-10', cfg2, { group: 'together', names: '橋本/遠藤' });
   assert.equal(txt, `橋本/遠藤
 ≪313≫　≪01-0973294≫　≪3912-1418-9520≫
 ≪327≫　≪01-0973007≫　≪3912-1418-9660≫
@@ -272,6 +272,8 @@ test('報告文：本日の発送分セクション（メール形式）', async
 
 以上`);
   assert.ok(!formatReport(units, '2026-10-10', cfg2, { ship: false }).includes('発送'));
+  // 既定：作業者ごと（メンバー順）
+  assert.ok(formatReport(units, '2026-10-10', cfg2).startsWith('遠藤\n≪327≫　≪01-0973007≫　≪3912-1418-9660≫\n合計1台\n\n橋本\n≪313≫'));
 });
 
 test('番号照合：該当・非該当・不一致・重複・補完', async () => {

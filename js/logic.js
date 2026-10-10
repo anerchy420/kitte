@@ -25,7 +25,7 @@ export const DEFAULT_CONFIG = {
   pcMax: 660,
   // 報告文（メール）
   reportVer: 2,
-  reportGroup: 'together', // together: 1つにまとめる（見出し=作業者を/区切り） | worker: 作業者ごと
+  reportGroup: 'worker', // worker: 作業者ごと | together: 1つにまとめる（見出し=作業者を/区切り）
   headerTpl: '{worker}',
   lineTpl: '≪{pc}≫　≪{yrl}≫　≪{slip}≫',
   groupFooterTpl: '合計{count}台',
