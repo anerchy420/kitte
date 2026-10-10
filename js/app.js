@@ -3,11 +3,12 @@ import {
   dateKey, fmtTime, fmtDur, hm, forecast, doneOn, carryFrom, activeMembers,
   textToTable, guessMapping, looksLikeHeader, rowsToRecords, planImport, buildImportUpdates,
   weekdayLabel, parsePlanText, normalizePlan, progressTable, planSummary, planCarry, dayBase,
+  buildRestoreUpdates,
   statusSideEffects, buildEditUpdates, formatReport, matchNumbers, shippedOn, shipDateOf, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 
-const APP_VERSION = '2026-10-10a';
+const APP_VERSION = '2026-10-10b';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -206,6 +207,7 @@ async function connect(teamId) {
     S.pending = !!meta.pending;
     if (!meta.fromCache) S.unitsLoaded = true;
     maybeEnsureDay();
+    maybeBackup();
     rerender('units');
   }));
   subscribeDay();
@@ -1814,10 +1816,23 @@ function renderSettings() {
         <button class="btn" id="s-logout">ログアウト</button>
       </div>
     </div>
+    <div class="card">
+      <div class="card-h"><h2>データの保護</h2></div>
+      <p class="small">入力したデータはクラウド（Firebase）に保存されています。アプリを更新しても消えません。さらに、毎日自動でバックアップを取っています（${BACKUP_KEEP}日分）。</p>
+      <div class="row wrap">
+        <button class="btn" id="s-bk-list">バックアップから復元</button>
+        <button class="btn" id="s-bk-now">今すぐバックアップ</button>
+      </div>
+      <div class="row wrap" style="margin-top:8px">
+        <button class="btn" id="s-json">全データをファイルに保存</button>
+        <label class="btn" style="margin:0">ファイルから復元<input type="file" id="s-json-in" accept=".json,application/json" hidden></label>
+      </div>
+      <p class="muted small">ファイル（.json）は、PC・実績・目標・設定のすべてを含みます。スマホやPCに保存しておくと、万一のときに戻せます。</p>
+    </div>
     <div class="card danger-zone">
       <div class="card-h"><h2>危険な操作</h2></div>
       <button class="btn danger" id="s-wipe">全データを削除</button>
-      <p class="muted small">案件終了時などに。事前にExcelで書き出しておくことをおすすめします。</p>
+      <p class="muted small">案件終了時などに。削除の前に、全データのファイルが自動で保存されます。自動バックアップは削除されません。</p>
     </div>`;
   const root = $('#tab-settings');
   root.querySelectorAll('[data-rm]').forEach((b) => (b.onclick = () => {
@@ -1849,6 +1864,23 @@ function renderSettings() {
     S.store.setConfig(p);
     toast('設定を保存しました');
   };
+  $('#s-bk-list').onclick = openBackupList;
+  $('#s-bk-now').onclick = async () => {
+    try {
+      await S.store.putMeta(bkId(S.today), await snapshotAll());
+      toast('バックアップしました');
+    } catch (e) { toast('バックアップに失敗: ' + e.message, 'err'); }
+  };
+  $('#s-json').onclick = () => saveJSONFile();
+  $('#s-json-in').onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      const data = JSON.parse(await f.text());
+      await restoreFrom(data, `ファイル ${f.name}`);
+    } catch (err) { toast('ファイルを読めませんでした: ' + err.message, 'err'); }
+    e.target.value = '';
+  };
   $('#s-name').onclick = () => showLogin(2);
   $('#s-logout').onclick = () => {
     if (!confirm('ログアウトしますか？（再度パスコードが必要です）')) return;
@@ -1858,10 +1890,81 @@ function renderSettings() {
   };
   $('#s-wipe').onclick = async () => {
     if (prompt('全データ（PC・目標・稼働・履歴・設定）を削除します。実行するには「削除」と入力してください') !== '削除') return;
+    await saveJSONFile('kitting_before_delete');
+    await S.store.putMeta('backup-before-restore', await snapshotAll()).catch(() => {});
     await S.store.deleteAll();
     toast('削除しました');
     setTimeout(() => location.reload(), 800);
   };
+}
+
+// ================= バックアップ =================
+const BACKUP_KEEP = 14; // 日数
+const bkId = (date) => `backup-${date}`;
+async function snapshotAll() {
+  const days = await S.store.listDays().catch(() => ({}));
+  return { app: 'kitte', ver: 1, at: Date.now(), by: S.me, units: S.units, days, config: S.cfg };
+}
+// 1日1回、その日最初に開いた端末がクラウドにバックアップを作る
+let backupTried = false;
+async function maybeBackup() {
+  if (backupTried || !S.unitsLoaded || !S.cfgLoaded || !Object.keys(S.units).length) return;
+  backupTried = true;
+  try {
+    if (await S.store.getMeta(bkId(S.today))) return;
+    await S.store.putMeta(bkId(S.today), await snapshotAll());
+    // 古いバックアップを削除
+    for (let i = BACKUP_KEEP; i < BACKUP_KEEP + 7; i++) S.store.delMeta(bkId(dateKey(dayBase(S.today) - i * 86400000 + 3600000)));
+  } catch (e) {
+    console.warn('backup failed', e);
+  }
+}
+function downloadJSON(data, name) {
+  download(name, JSON.stringify(data), 'application/json');
+}
+async function saveJSONFile(prefix = 'kitting_backup') {
+  downloadJSON(await snapshotAll(), `${prefix}_${stamp()}.json`);
+}
+
+async function restoreFrom(data, label) {
+  if (!data?.units) return toast('バックアップの形式が正しくありません', 'err');
+  const keepNew = true;
+  const { ups, changed } = buildRestoreUpdates(data.units, S.units, { keepNew });
+  const at = data.at ? `${dateKey(data.at)} ${fmtTime(data.at)}` : '';
+  if (!changed && !data.days) return toast('現在の内容と同じです');
+  if (!confirm(`${label}（${at}）の内容に戻します。\n・PC ${changed}台の内容を戻す（その後に追加したPCは残します）\n・日別の目標・稼働も戻します\n\n念のため、今の内容をファイルに保存してから実行します。よろしいですか？`)) return;
+  await saveJSONFile('kitting_before_restore');
+  await S.store.putMeta('backup-before-restore', await snapshotAll()).catch(() => {});
+  if (changed) await S.store.setUnits(ups);
+  for (const [d, v] of Object.entries(data.days || {})) await S.store.setDay(d, v);
+  S.store.addLog(S.today, logEntries([{ msg: `${label}から復元（PC ${changed}台）` }]));
+  toast('復元しました');
+}
+
+async function openBackupList() {
+  openSheet('<h3>バックアップから復元</h3><p class="muted">読み込み中…</p>', () => {});
+  const list = [];
+  const ids = [...Array(BACKUP_KEEP).keys()].map((i) => bkId(dateKey(dayBase(S.today) - i * 86400000 + 3600000)));
+  ids.push('backup-before-restore');
+  for (const id of ids) {
+    const d = await S.store.getMeta(id).catch(() => null);
+    if (d) list.push([id, d]);
+  }
+  openSheet(`
+    <h3>バックアップから復元</h3>
+    <p class="muted small">毎日その日最初にアプリを開いたときに自動で保存されます（${BACKUP_KEEP}日分）。</p>
+    ${list.length ? `<ul class="members">${list.map(([id, d], i) => `<li><span>${id === 'backup-before-restore' ? '復元する直前の状態' : esc(id.slice(7))}<br><small class="muted">${d.at ? `${dateKey(d.at)} ${fmtTime(d.at)}` : ''} ${esc(d.by || '')}・PC ${Object.keys(d.units || {}).length}台・完了 ${Object.values(d.units || {}).filter((u) => isDone(u.status)).length}台</small></span>
+      <button class="btn sm" data-i="${i}">この状態に戻す</button></li>`).join('')}</ul>` : '<p class="muted">まだバックアップがありません</p>'}
+    <div class="sheet-actions"><button class="btn" data-close>閉じる</button></div>`, (sh) => {
+    sh.querySelector('[data-close]').onclick = closeSheet;
+    sh.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-i]');
+      if (!b) return;
+      const [id, d] = list[Number(b.dataset.i)];
+      closeSheet();
+      await restoreFrom(d, id === 'backup-before-restore' ? '復元前の状態' : `バックアップ ${id.slice(7)}`);
+    });
+  });
 }
 
 // ================= 定期処理 =================

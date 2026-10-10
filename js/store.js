@@ -87,11 +87,18 @@ async function createFirebaseStore(teamId) {
       if (!entries.length) return Promise.resolve();
       return commit(fs.setDoc(ref('logs', date), { e: fs.arrayUnion(...entries) }, { merge: true }));
     },
+    // バックアップ等（meta/ の任意ドキュメント、上書き保存）
+    async getMeta(id) {
+      const s = await fs.getDoc(ref('meta', id));
+      return s.exists() ? s.data() : null;
+    },
+    putMeta(id, data) { return fs.setDoc(ref('meta', id), data); },
+    delMeta(id) { return fs.deleteDoc(ref('meta', id)).catch(() => {}); },
     async deleteAll() {
       for (const name of ['units', 'days', 'logs', 'meta']) {
         const snap = await fs.getDocs(col(name));
         const b = fs.writeBatch(db);
-        snap.forEach((d) => b.delete(d.ref));
+        snap.forEach((d) => { if (!d.id.startsWith('backup-')) b.delete(d.ref); }); // 自動バックアップは残す
         await b.commit();
       }
     },
@@ -149,5 +156,8 @@ class LocalStore {
   async listDays() { return structuredClone(this.s.days); }
   onLog(date, cb) { return this.sub(() => cb([...(this.s.logs[date] || [])])); }
   addLog(date, entries) { (this.s.logs[date] ||= []).push(...entries); return this.save(); }
-  async deleteAll() { this.s = { units: {}, days: {}, logs: {} }; return this.save(); }
+  async getMeta(id) { return this.s.meta?.[id] ? structuredClone(this.s.meta[id]) : null; }
+  putMeta(id, data) { (this.s.meta ||= {})[id] = structuredClone(data); return this.save(); }
+  delMeta(id) { if (this.s.meta) delete this.s.meta[id]; return this.save(); }
+  async deleteAll() { this.s = { units: {}, days: {}, logs: {}, meta: this.s.meta || {} }; return this.save(); }
 }

@@ -301,3 +301,21 @@ test('番号照合：該当・非該当・不一致・重複・補完', async ()
   assert.equal(r2[0].by, 'yrl');
   assert.ok(r2[0].mismatch[0].includes('伝票番号が違います'));
 });
+
+test('復元：バックアップ後の追加は残し、変更されたPCだけ戻す', async () => {
+  const { buildRestoreUpdates } = await import('../js/logic.js');
+  const bk = { 271: { pc: 271, yrl: 'A', slip: 'S', status: 'packed', packedDate: 'D' }, 272: { pc: 272, yrl: 'B', status: 'todo' } };
+  const cur = {
+    271: { pc: 271, yrl: 'A', slip: '', status: 'todo', packedDate: null }, // 誤って上書きされた
+    272: { pc: 272, yrl: 'B', status: 'todo' },
+    300: { pc: 300, yrl: 'N', status: 'todo' }, // 後から追加
+  };
+  const r = buildRestoreUpdates(bk, cur);
+  assert.equal(r.changed, 1);
+  assert.equal(r.ups[271].slip, 'S');
+  assert.equal(r.ups[271].status, 'packed');
+  assert.equal(r.ups[271].shippedDate, null);
+  assert.equal(r.ups[272], undefined);
+  assert.equal(r.ups[300], undefined);
+  assert.equal(buildRestoreUpdates(bk, cur, { keepNew: false }).ups[300], null);
+});

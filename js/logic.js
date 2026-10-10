@@ -742,3 +742,21 @@ export function planCarry(units, planRows, date) {
   if (!last || last.cumTarget == null) return 0;
   return Math.max(0, last.cumTarget - last.cumActual);
 }
+
+// ---------- バックアップ・復元 ----------
+export const UNIT_FIELDS = ['pc', 'yrl', 'slip', 'worker', 'status', 'packedDate', 'packedAt', 'shippedAt', 'shippedDate', 'note', 'importId', 'createdAt', 'updatedAt', 'updatedBy'];
+// バックアップの内容に戻す更新。バックアップ後に追加されたPCは残す（keepNew=false で削除）
+export function buildRestoreUpdates(backupUnits, currentUnits, { keepNew = true } = {}) {
+  const ups = {};
+  let changed = 0;
+  for (const [pc, bu] of Object.entries(backupUnits || {})) {
+    const full = Object.fromEntries(UNIT_FIELDS.map((k) => [k, bu[k] ?? null]));
+    full.pc = bu.pc ?? Number(pc);
+    full.status = bu.status || 'todo';
+    const cur = currentUnits[pc];
+    if (!cur || UNIT_FIELDS.some((k) => (cur[k] ?? null) !== full[k])) { ups[pc] = full; changed++; }
+  }
+  let removed = 0;
+  if (!keepNew) for (const pc of Object.keys(currentUnits)) if (!backupUnits?.[pc]) { ups[pc] = null; removed++; }
+  return { ups, changed, removed };
+}
