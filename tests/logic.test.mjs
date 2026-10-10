@@ -334,3 +334,26 @@ test('バーコード値の判定', async () => {
   assert.equal(parseScan('4549210000000').kind, null); // JANコードは対象外
   assert.equal(parseScan('12').kind, null); // 範囲外の数字
 });
+
+test('スキャン登録：新規・既存の空欄補完・重複や上書きは止める', async () => {
+  const { planRegister } = await import('../js/logic.js');
+  const units = {
+    313: { pc: 313, yrl: '01-0973294', slip: '', worker: '', status: 'todo' },
+    327: { pc: 327, yrl: '01-0973007', slip: '3912-1418-9660', worker: '遠藤', status: 'packed', packedDate: 'D' },
+  };
+  const o = { status: 'packed', date: '2026-10-10', me: '神谷', now: 1 };
+  let r = planRegister({ pc: '400', yrl: '010973381', slip: '391214190942' }, units, o);
+  assert.equal(r.ok, true);
+  assert.equal(r.isNew, true);
+  assert.deepEqual([r.ups[400].yrl, r.ups[400].slip, r.ups[400].status, r.ups[400].packedDate, r.ups[400].worker], ['01-0973381', '3912-1419-0942', 'packed', '2026-10-10', '神谷']);
+  r = planRegister({ pc: 313, yrl: '01-0973294', slip: '3912-1418-9520' }, units, o); // 既存：伝票だけ埋める
+  assert.equal(r.ok, true);
+  assert.equal(r.ups[313].slip, '3912-1418-9520');
+  assert.equal(r.ups[313].yrl, undefined);
+  assert.equal(r.ups[313].status, 'packed');
+  assert.equal(planRegister({ pc: 313, yrl: '01-0000001' }, units, o).ok, false); // 既存のYRLと違う
+  assert.match(planRegister({ pc: 500, yrl: '01-0973007' }, units, o).msg, /PC327に登録済み/);
+  assert.match(planRegister({ pc: 500, slip: '3912-1418-9660' }, units, o).msg, /PC327に登録済み/);
+  assert.equal(planRegister({ pc: '', yrl: '01-0973381' }, units, o).ok, false);
+  assert.equal(planRegister({ pc: 327, slip: '3912-1418-9660' }, units, o).ups[327], undefined); // 変更なし
+});

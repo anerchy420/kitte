@@ -780,3 +780,32 @@ export function parseScan(raw, cfg = DEFAULT_CONFIG) {
   return { kind: null, value: s, raw };
 }
 export const SCAN_KIND_LABEL = { slip: '伝票番号', yrl: 'YRL番号', pc: 'PC番号' };
+
+// スキャンで新規登録：{pc, yrl, slip} を登録できるか判定し、更新内容を作る
+// 既存の値は上書きしない（違う値なら止める）。空欄だけ埋める。
+export function planRegister({ pc, yrl, slip }, units, { status = 'packed', date, me = '', now = Date.now() } = {}) {
+  const n = parsePc(pc);
+  if (n == null) return { ok: false, msg: 'PC番号を入力してください' };
+  yrl = yrl ? (parseScan(yrl).kind === 'yrl' ? parseScan(yrl).value : normNum(yrl)) : '';
+  slip = slip ? normSlip(slip) : '';
+  if (yrl && !YRL_RE.test(yrl)) return { ok: false, msg: `YRL番号の形式が違います（${yrl}）` };
+  if (slip && !SLIP_RE.test(slip)) return { ok: false, msg: `伝票番号の形式が違います（${slip}）` };
+  for (const u of Object.values(units)) {
+    if (Number(u.pc) === n) continue;
+    if (yrl && u.yrl === yrl) return { ok: false, msg: `YRL番号 ${yrl} はPC${u.pc}に登録済みです` };
+    if (slip && u.slip === slip) return { ok: false, msg: `伝票番号 ${slip} はPC${u.pc}に登録済みです` };
+  }
+  const cur = units[n];
+  if (cur?.yrl && yrl && cur.yrl !== yrl) return { ok: false, msg: `PC${n}のYRL番号はすでに ${cur.yrl} です` };
+  if (cur?.slip && slip && cur.slip !== slip) return { ok: false, msg: `PC${n}の伝票番号はすでに ${cur.slip} です` };
+  const ch = {};
+  if (yrl && !cur?.yrl) ch.yrl = yrl;
+  if (slip && !cur?.slip) ch.slip = slip;
+  if (!cur?.worker && me) ch.worker = me;
+  const st = cur?.status || 'todo';
+  if (status && status !== st && !(status === 'packed' && st === 'shipped')) Object.assign(ch, { status }, statusSideEffects(cur, status, date, cur?.worker || me));
+  const isNew = !cur;
+  if (!isNew && !Object.keys(ch).length) return { ok: true, isNew, ups: {}, msg: `PC${n}は登録済みです（変更なし）` };
+  const base = isNew ? { pc: n, yrl: '', slip: '', worker: '', status: 'todo', packedDate: null, note: '', createdAt: now } : {};
+  return { ok: true, isNew, pc: n, ups: { [n]: { ...base, ...ch, updatedAt: now, updatedBy: me } }, msg: `PC${n}を${isNew ? '新規登録' : '更新'}しました` };
+}

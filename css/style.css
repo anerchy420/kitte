@@ -368,3 +368,14 @@ label > .row input { margin: 0; }
 .sc-torch.on { background: #ffd54a; }
 .sc-target { padding: 6px 14px 10px; font-size: 14px; background: #000; color: #ffd54a; }
 .sc-log .n { font-weight: 700; margin-left: 4px; }
+.sc-panel { background: #1b2129; padding: 4px 14px 8px; }
+.reg label { color: #c9d2de; margin: 6px 0; }
+.reg input, .reg select { background: #fff; color: #1c2430; padding: 8px 10px; }
+.reg .check-l { color: #c9d2de; margin: 0; }
+.reg .btn { color: var(--text); }
+.reg .btn.primary { color: #fff; }
+.rg-info { font-size: 13px; color: #9fe0b8; min-height: 18px; }
+.rg-info.ng { color: #ff9b9b; }
+.scanner.with-panel .sc-view { min-height: 140px; flex-basis: 30vh; }
+.scanner.with-panel .sc-log { max-height: 12vh; }
+.scanner { overflow-y: auto; }

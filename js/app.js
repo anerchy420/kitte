@@ -4,13 +4,13 @@ import {
   textToTable, guessMapping, looksLikeHeader, rowsToRecords, planImport, buildImportUpdates,
   weekdayLabel, parsePlanText, normalizePlan, progressTable, planSummary, planCarry, dayBase,
   buildRestoreUpdates,
-  parseScan, SCAN_KIND_LABEL,
+  parseScan, SCAN_KIND_LABEL, planRegister,
   statusSideEffects, buildEditUpdates, formatReport, matchNumbers, shippedOn, shipDateOf, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 import { openScanner } from './scanner.js';
 
-const APP_VERSION = '2026-10-10e';
+const APP_VERSION = '2026-10-10g';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -340,7 +340,7 @@ function renderHome() {
   if (!root.querySelector('#home-dyn')) {
     root.innerHTML = `
       <div class="card quick">
-        <div class="seg two quick-mode"><button type="button" data-qm="open" class="on">PCを開く</button><button type="button" data-qm="ship">発送登録</button></div>
+        <div class="seg quick-mode"><button type="button" data-qm="open" class="on">PCを開く</button><button type="button" data-qm="reg">新規登録</button><button type="button" data-qm="ship">発送登録</button></div>
         <form id="quick-form" class="row">
           <input id="quick-pc" inputmode="numeric" placeholder="PC番号・YRL・伝票番号で開く" autocomplete="off">
           <button type="button" class="btn cam" id="quick-cam" title="カメラで読み取る">📷</button>
@@ -356,15 +356,24 @@ function renderHome() {
       if (!b) return;
       qm = b.dataset.qm;
       root.querySelectorAll('[data-qm]').forEach((x) => x.classList.toggle('on', x === b));
-      $('#quick-pc').placeholder = qm === 'ship' ? '伝票番号を入力／スキャン' : 'PC番号・YRL・伝票番号で開く';
-      $('#quick-go').textContent = qm === 'ship' ? '発送' : '開く';
-      $('#quick-help').classList.toggle('hidden', qm !== 'ship');
+      $('#quick-pc').placeholder = { ship: '伝票番号を入力／スキャン', reg: 'PC番号（あとで入力も可）', open: 'PC番号・YRL・伝票番号で開く' }[qm];
+      $('#quick-go').textContent = { ship: '発送', reg: '登録', open: '開く' }[qm];
+      $('#quick-help').textContent = qm === 'ship'
+        ? '伝票番号（またはPC・YRL番号）を入れてEnter／スキャンすると、その台を本日付で発送済みにします。'
+        : '📷 でYRLラベルと伝票を読み取り、PC番号を入れて登録します。続けて次の箱も登録できます。';
+      $('#quick-help').classList.toggle('hidden', qm === 'open');
       $('#quick-pc').focus();
     });
     $('#quick-form').addEventListener('submit', (e) => {
       e.preventDefault();
       const v = $('#quick-pc').value.trim();
+      if (!v && qm === 'reg') { openRegister(); return; }
       if (!v) return;
+      if (qm === 'reg') {
+        $('#quick-pc').value = '';
+        openRegister({ pc: v });
+        return;
+      }
       if (qm === 'ship') {
         quickShip(v);
         $('#quick-pc').value = '';
@@ -379,7 +388,11 @@ function renderHome() {
       $('#quick-pc').blur();
     });
     $('#quick-cam').addEventListener('click', () => {
-      if (qm === 'ship') {
+      if (qm === 'reg') {
+        const v = $('#quick-pc').value.trim();
+        $('#quick-pc').value = '';
+        openRegister(v ? { pc: v } : {});
+      } else if (qm === 'ship') {
         openScanner({
           title: '発送登録（連続スキャン）',
           target: 'ヤマト伝票（下に a3912…a と書いてあるバーコード）',
@@ -399,7 +412,10 @@ function renderHome() {
           cfg: S.cfg,
           onScan: (p) => {
             const r = matchNumbers(p.value, S.units, S.cfg)[0];
-            if (!r?.unit) return { ok: false, msg: `${SCAN_KIND_LABEL[p.kind]} ${p.value} は登録されていません` };
+            if (!r?.unit) {
+              setTimeout(() => openRegister({ [p.kind]: p.value }), 350);
+              return { ok: true, msg: `${SCAN_KIND_LABEL[p.kind]} ${p.value} は未登録 → 新規登録へ` };
+            }
             setTimeout(() => openUnit(r.unit.pc), 350);
             return { ok: true, msg: `PC${r.unit.pc}` };
           },
@@ -1068,6 +1084,119 @@ function quickShip(raw) {
   renderShipLog();
   return first;
 }
+// スキャンで新規登録：YRL・伝票を読み（順不同）、PC番号を入れて保存 → 次の箱へ
+function openRegister(prefill = {}) {
+  const findBy = (k, v) => (v ? Object.values(S.units).find((u) => u[k] === v) : null);
+  let api;
+  const count = { n: 0 };
+  const $r = (id) => api.el.querySelector('#' + id);
+  const info = (t, cls = '') => { const e = $r('rg-info'); e.textContent = t; e.className = 'rg-info ' + cls; };
+  const refresh = () => {
+    const yrl = $r('rg-yrl').value.trim();
+    const slip = $r('rg-slip').value.trim();
+    const pcEl = $r('rg-pc');
+    const byY = findBy('yrl', parseScan(yrl, S.cfg).kind === 'yrl' ? parseScan(yrl, S.cfg).value : yrl);
+    if (byY && !pcEl.value) pcEl.value = byY.pc;
+    const pc = parsePc(pcEl.value);
+    const cur = pc != null ? S.units[pc] : null;
+    const bySlip = findBy('slip', normSlip(slip));
+    if (bySlip && Number(bySlip.pc) !== pc) info(`⚠ この伝票はPC${bySlip.pc}に登録済みです`, 'ng');
+    else if (byY && pc != null && Number(byY.pc) !== pc) info(`⚠ このYRLはPC${byY.pc}に登録済みです`, 'ng');
+    else if (cur) info(`PC${pc}は登録済み（${STATUS_LABEL[cur.status]}${cur.yrl ? '・YRLあり' : ''}${cur.slip ? '・伝票あり' : ''}）→ 空欄だけ追加します`);
+    else if (pc != null) info(`PC${pc}を新規登録します`);
+    else info(yrl || slip ? 'PC番号を入力してください' : 'YRLラベルと伝票を読み取ってください（順番は自由）');
+  };
+  const clear = () => {
+    ['rg-yrl', 'rg-slip', 'rg-pc'].forEach((id) => { $r(id).value = ''; });
+    refresh();
+  };
+  let autoTimer = null;
+  const justSaved = new Map(); // 今この画面で登録した番号 → PC番号（カメラに写り続けても再入力しない）
+  const save = () => {
+    clearTimeout(autoTimer);
+    if (!$r('rg-pc').value.trim() && !$r('rg-yrl').value.trim() && !$r('rg-slip').value.trim()) return false;
+    const plan = planRegister({ pc: $r('rg-pc').value, yrl: $r('rg-yrl').value.trim(), slip: $r('rg-slip').value.trim() }, S.units, { status: $r('rg-st').value, date: S.today, me: S.me });
+    const li = document.createElement('li');
+    if (!plan.ok) {
+      api.setMsg(plan.msg, 'ng');
+      api.beep(false);
+      return false;
+    }
+    if (Object.keys(plan.ups).length) {
+      S.store.setUnits(plan.ups);
+      S.units = { ...S.units, ...Object.fromEntries(Object.entries(plan.ups).map(([k, v]) => [k, { ...(S.units[k] || {}), ...v }])) };
+      S.store.addLog(S.today, logEntries([{ pc: plan.pc, msg: plan.msg }]));
+      S.lastRegPc = plan.pc;
+      for (const v of [$r('rg-yrl').value.trim(), normSlip($r('rg-slip').value.trim())]) if (v) justSaved.set(parseScan(v, S.cfg).value, plan.pc);
+      count.n++;
+    }
+    li.className = 'ok';
+    li.textContent = `✅ ${plan.msg}`;
+    api.el.querySelector('.sc-log').prepend(li);
+    api.setMsg(`${plan.msg}。次の箱をどうぞ（この画面で${count.n}台）`);
+    api.beep(true);
+    clear();
+    return true;
+  };
+  const tryAuto = () => {
+    if (!$r('rg-auto').checked) return;
+    clearTimeout(autoTimer);
+    if (parsePc($r('rg-pc').value) != null && $r('rg-yrl').value && $r('rg-slip').value) autoTimer = setTimeout(save, 150);
+  };
+  openScanner({
+    title: 'スキャンで新規登録',
+    target: 'YRLラベルと伝票（順番は自由）',
+    hint: '読み取った番号が下の欄に入ります。PC番号を入れて保存',
+    continuous: true,
+    cfg: S.cfg,
+    panel: `
+      <div class="reg">
+        <label>PC番号<span class="row"><input id="rg-pc" inputmode="numeric" autocomplete="off" placeholder="例 314"><button type="button" class="btn sm" id="rg-next">次の番号</button></span></label>
+        <label>YRL番号<input id="rg-yrl" autocomplete="off" placeholder="スキャン（手入力も可）"></label>
+        <label>発送伝票番号<input id="rg-slip" inputmode="numeric" autocomplete="off" placeholder="スキャン（なければ空欄）"></label>
+        <div id="rg-info" class="rg-info"></div>
+        <div class="row wrap">
+          <select id="rg-st"><option value="packed">梱包済みにする</option><option value="wip">作業中にする</option><option value="">ステータスは変えない</option></select>
+          <label class="check-l"><input type="checkbox" id="rg-auto" checked>3つそろったら自動で保存</label>
+        </div>
+        <div class="row"><button type="button" class="btn" id="rg-clear">クリア</button><button type="button" class="btn primary grow" id="rg-save">保存して次へ</button></div>
+      </div>`,
+    onReady: (a) => {
+      api = a;
+      api.el.classList.add('with-panel');
+      if (prefill.pc) $r('rg-pc').value = prefill.pc;
+      if (prefill.yrl) $r('rg-yrl').value = prefill.yrl;
+      if (prefill.slip) $r('rg-slip').value = prefill.slip;
+      const panel = api.el.querySelector('.reg');
+      panel.addEventListener('input', refresh);
+      $r('rg-slip').addEventListener('blur', (e) => { e.target.value = normSlip(e.target.value); refresh(); });
+      $r('rg-yrl').addEventListener('blur', (e) => { const p = parseScan(e.target.value, S.cfg); if (p.kind === 'yrl') e.target.value = p.value; refresh(); });
+      $r('rg-pc').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); tryAuto(); } });
+      $r('rg-next').onclick = () => {
+        // 前回登録した番号＋1。なければ登録済みの最大番号＋1
+        const maxPc = Math.max(Number(S.cfg.pcMin) - 1, ...Object.keys(S.units).map(Number).filter(Number.isFinite));
+        let n = (S.lastRegPc ?? maxPc) + 1;
+        while (S.units[n]?.yrl && n <= Number(S.cfg.pcMax)) n++;
+        $r('rg-pc').value = n;
+        refresh();
+        tryAuto();
+      };
+      $r('rg-clear').onclick = clear;
+      $r('rg-save').onclick = save;
+      refresh();
+    },
+    onScan: (p) => {
+      if (justSaved.has(p.value)) return { ok: false, msg: `${p.value} は登録済み（PC${justSaved.get(p.value)}）。次の箱を写してください` };
+      if (p.kind === 'yrl') $r('rg-yrl').value = p.value;
+      else if (p.kind === 'slip') $r('rg-slip').value = p.value;
+      else if (p.kind === 'pc') $r('rg-pc').value = p.value;
+      refresh();
+      tryAuto();
+      return { ok: true, msg: `${SCAN_KIND_LABEL[p.kind]} ${p.value} を読み取り` };
+    },
+  });
+}
+
 function renderShipLog() {
   const box = $('#ship-log');
   if (!box) return;

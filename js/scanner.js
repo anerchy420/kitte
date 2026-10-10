@@ -77,7 +77,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
  * @param {object} [o.cfg] PC番号の範囲など
  * @param {(p:{kind,value,raw})=>({ok:boolean,msg:string,done?:boolean})} o.onScan
  */
-export function openScanner({ title, hint = '', target = '', continuous = false, cfg, onScan, onClose }) {
+export function openScanner({ title, hint = '', target = '', continuous = false, cfg, onScan, onClose, panel = '', onReady }) {
   const el = document.createElement('div');
   el.className = 'scanner';
   el.innerHTML = `
@@ -85,6 +85,7 @@ export function openScanner({ title, hint = '', target = '', continuous = false,
     ${target ? `<div class="sc-target">読むバーコード：<b>${esc(target)}</b></div>` : ''}
     <div class="sc-view"><video playsinline muted autoplay></video><div class="sc-guide"><i></i></div><div class="sc-flash"></div></div>
     <div class="sc-msg">${esc(hint || 'バーコードを枠の中に横向きで写してください')}</div>
+    ${panel ? `<div class="sc-panel">${panel}</div>` : ''}
     <ul class="sc-log"></ul>
     <div class="sc-bottom">
       <label class="btn">📷 写真で読み取る<input type="file" accept="image/*" capture="environment" hidden></label>
@@ -250,5 +251,7 @@ export function openScanner({ title, hint = '', target = '', continuous = false,
     decodeFrame();
   })();
 
-  return { close, handle };
+  const api = { el, close, handle, setMsg, beep };
+  onReady?.(api);
+  return api;
 }
