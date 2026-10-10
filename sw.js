@@ -1,6 +1,6 @@
 // 画面ファイルをキャッシュし、電波が悪くても起動できるようにする（ネットワーク優先）
-const CACHE = 'kitte-v3';
-const SHELL = ['./', 'index.html', 'css/style.css', 'js/app.js', 'js/logic.js', 'js/store.js', 'js/firebase-config.js', 'icon.svg', 'manifest.webmanifest'];
+const CACHE = 'kitte-v4';
+const SHELL = ['./', 'index.html', 'css/style.css', 'js/app.js', 'js/logic.js', 'js/store.js', 'js/scanner.js', 'js/firebase-config.js', 'icon.svg', 'manifest.webmanifest'];
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });

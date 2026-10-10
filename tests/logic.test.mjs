@@ -321,3 +321,16 @@ test('復元：バックアップ後の追加は残し、変更されたPCだけ
   assert.equal(r.ups[300], undefined);
   assert.equal(buildRestoreUpdates(bk, cur, { keepNew: false }).ups[300], null);
 });
+
+test('バーコード値の判定', async () => {
+  const { parseScan } = await import('../js/logic.js');
+  assert.deepEqual(parseScan('a391214190942a'), { kind: 'slip', value: '3912-1419-0942', raw: 'a391214190942a' });
+  assert.equal(parseScan('A391214190942A').value, '3912-1419-0942');
+  assert.equal(parseScan('391214190942').value, '3912-1419-0942');
+  assert.deepEqual(parseScan('010973381'), { kind: 'yrl', value: '01-0973381', raw: '010973381' });
+  assert.equal(parseScan('01-0973381').value, '01-0973381');
+  assert.equal(parseScan('313').kind, 'pc');
+  assert.equal(parseScan('FC003NTR').kind, null);
+  assert.equal(parseScan('4549210000000').kind, null); // JANコードは対象外
+  assert.equal(parseScan('12').kind, null); // 範囲外の数字
+});

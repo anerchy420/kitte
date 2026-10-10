@@ -760,3 +760,23 @@ export function buildRestoreUpdates(backupUnits, currentUnits, { keepNew = true 
   if (!keepNew) for (const pc of Object.keys(currentUnits)) if (!backupUnits?.[pc]) { ups[pc] = null; removed++; }
   return { ups, changed, removed };
 }
+
+// ---------- バーコード ----------
+// 読み取った値 → { kind: 'slip'|'yrl'|'pc'|null, value, raw }
+//   ヤマト伝票(Codabar)「a391214190942a」→ 伝票 3912-1419-0942
+//   YRLラベル(Code39)「010973381」→ YRL 01-0973381
+export function parseScan(raw, cfg = DEFAULT_CONFIG) {
+  let s = normNum(raw).replace(/\s+/g, '');
+  // Codabar のスタート/ストップ文字（A〜D）を外す
+  const cb = /^[A-Da-d](\d[\d-]*)[A-Da-d]$/.exec(s);
+  if (cb) s = cb[1];
+  const d = s.replace(/-/g, '');
+  if (/^\d{12}$/.test(d)) return { kind: 'slip', value: normSlip(d), raw };
+  if (/^\d{9}$/.test(d) && (/^\d{2}-\d{7}$/.test(s) || !s.includes('-'))) return { kind: 'yrl', value: `${d.slice(0, 2)}-${d.slice(2)}`, raw };
+  if (/^\d{1,4}$/.test(s)) {
+    const n = Number(s);
+    if (n >= (cfg.pcMin ?? 0) && n <= (cfg.pcMax ?? 99999)) return { kind: 'pc', value: String(n), raw };
+  }
+  return { kind: null, value: s, raw };
+}
+export const SCAN_KIND_LABEL = { slip: '伝票番号', yrl: 'YRL番号', pc: 'PC番号' };

@@ -4,11 +4,13 @@ import {
   textToTable, guessMapping, looksLikeHeader, rowsToRecords, planImport, buildImportUpdates,
   weekdayLabel, parsePlanText, normalizePlan, progressTable, planSummary, planCarry, dayBase,
   buildRestoreUpdates,
+  parseScan, SCAN_KIND_LABEL,
   statusSideEffects, buildEditUpdates, formatReport, matchNumbers, shippedOn, shipDateOf, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
+import { openScanner } from './scanner.js';
 
-const APP_VERSION = '2026-10-10c';
+const APP_VERSION = '2026-10-10d';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -341,6 +343,7 @@ function renderHome() {
         <div class="seg two quick-mode"><button type="button" data-qm="open" class="on">PCを開く</button><button type="button" data-qm="ship">発送登録</button></div>
         <form id="quick-form" class="row">
           <input id="quick-pc" inputmode="numeric" placeholder="PC番号・YRL・伝票番号で開く" autocomplete="off">
+          <button type="button" class="btn cam" id="quick-cam" title="カメラで読み取る">📷</button>
           <button class="btn primary" id="quick-go">開く</button>
         </form>
         <p id="quick-help" class="muted small hidden">伝票番号（またはPC・YRL番号）を入れてEnter／スキャンすると、その台を本日付で発送済みにします。</p>
@@ -374,6 +377,32 @@ function renderHome() {
       openUnit(pc);
       $('#quick-pc').value = '';
       $('#quick-pc').blur();
+    });
+    $('#quick-cam').addEventListener('click', () => {
+      if (qm === 'ship') {
+        openScanner({
+          title: '発送登録（連続スキャン）',
+          hint: '伝票のバーコードを枠に入れると、その台を発送済みにします',
+          continuous: true,
+          cfg: S.cfg,
+          onScan: (p) => {
+            const r = quickShip(p.value);
+            if (!r) return { ok: false, msg: `${p.value} 該当なし` };
+            return { ok: r.ok, msg: `${r.pc != null ? `PC${r.pc}` : r.text} ${r.ok ? '発送済みにしました' : r.msg}` };
+          },
+        });
+      } else {
+        openScanner({
+          title: 'バーコードでPCを開く',
+          cfg: S.cfg,
+          onScan: (p) => {
+            const r = matchNumbers(p.value, S.units, S.cfg)[0];
+            if (!r?.unit) return { ok: false, msg: `${SCAN_KIND_LABEL[p.kind]} ${p.value} は登録されていません` };
+            setTimeout(() => openUnit(r.unit.pc), 350);
+            return { ok: true, msg: `PC${r.unit.pc}` };
+          },
+        });
+      }
     });
     $('#ship-log').addEventListener('click', (e) => {
       const b = e.target.closest('[data-undo]');
@@ -951,7 +980,7 @@ function renderMatch() {
   box.innerHTML = `
     <div class="card-h"><h2>番号で照合・発送登録</h2>${res ? '<button class="link" id="mt-clear">クリア</button>' : ''}</div>
     <textarea id="mt-text" rows="${res ? 3 : 6}" placeholder="発送する分の報告文や番号を貼り付け（伝票番号・YRL番号・PC番号のどれでも。1行に1台）">${esc(M.text)}</textarea>
-    <button class="btn block" id="mt-go">照合する</button>
+    <div class="row"><button class="btn grow" id="mt-cam">📷 スキャンして追加</button><button class="btn primary grow" id="mt-go">照合する</button></div>
     ${body}`;
   $('#mt-text').oninput = (e) => { M.text = e.target.value; };
   $('#mt-go').onclick = () => {
@@ -962,6 +991,29 @@ function renderMatch() {
     renderMatch();
   };
   $('#mt-clear')?.addEventListener('click', () => { S.match = null; renderMatch(); });
+  $('#mt-cam').onclick = () => {
+    const have = new Set((M.text.match(/[\d-]{6,}/g) || []).map((x) => parseScan(x, S.cfg).value));
+    let added = 0;
+    openScanner({
+      title: '照合する番号をスキャン',
+      hint: '伝票・YRLのバーコードを続けて読み取れます。終わったら「完了」',
+      continuous: true,
+      cfg: S.cfg,
+      onScan: (p) => {
+        if (have.has(p.value)) return { ok: false, msg: `${p.value} はもう追加済みです` };
+        have.add(p.value);
+        M.text = (M.text.trim() ? M.text.replace(/\s*$/, '\n') : '') + p.value;
+        added++;
+        const u = matchNumbers(p.value, S.units, S.cfg)[0]?.unit;
+        return { ok: true, msg: `${p.value}${u ? `（PC${u.pc}）` : '（未登録）'} を追加（計${added}件）` };
+      },
+      onClose: () => {
+        if (!added) return renderMatch();
+        M.res = matchNumbers(M.text, S.units, S.cfg);
+        renderMatch();
+      },
+    });
+  };
   if (!res) return;
   $('#mt-date').onchange = (e) => { M.date = e.target.value || S.today; };
   $('#mt-fill').onchange = (e) => { M.fill = e.target.checked; };
@@ -998,20 +1050,20 @@ function renderMatch() {
 function quickShip(raw) {
   const res = matchNumbers(raw, S.units, S.cfg);
   const log = (S.shipLog ||= []);
-  if (!res.length) {
-    log.unshift({ t: Date.now(), text: raw, ok: false, msg: '番号を読み取れません' });
-  } else {
-    for (const r of res) {
-      if (!r.unit) { log.unshift({ t: Date.now(), text: r.slip || r.yrl || (r.pc != null ? `PC${r.pc}` : raw), ok: false, msg: '該当なし' }); continue; }
-      const u = r.unit;
-      if (u.status === 'shipped') { log.unshift({ t: Date.now(), pc: u.pc, ok: false, msg: `すでに発送済み（${(shipDateOf(u) || '').slice(5)}）` }); continue; }
-      const prev = u.status;
-      shipUnits([String(u.pc)], S.today, Object.keys(r.fill).length ? { [u.pc]: r.fill } : {});
-      log.unshift({ t: Date.now(), pc: u.pc, ok: true, prev, msg: r.mismatch.join(' / ') });
-    }
+  let first = null;
+  const push = (e) => { log.unshift({ t: Date.now(), ...e }); first ||= e; };
+  if (!res.length) push({ text: raw, ok: false, msg: '番号を読み取れません' });
+  for (const r of res) {
+    if (!r.unit) { push({ text: r.slip || r.yrl || (r.pc != null ? `PC${r.pc}` : raw), ok: false, msg: '該当なし' }); continue; }
+    const u = r.unit;
+    if (u.status === 'shipped') { push({ pc: u.pc, ok: false, msg: `すでに発送済み（${(shipDateOf(u) || '').slice(5)}）` }); continue; }
+    const prev = u.status;
+    shipUnits([String(u.pc)], S.today, Object.keys(r.fill).length ? { [u.pc]: r.fill } : {});
+    push({ pc: u.pc, ok: true, prev, msg: r.mismatch.join(' / ') });
   }
   log.splice(30);
   renderShipLog();
+  return first;
 }
 function renderShipLog() {
   const box = $('#ship-log');
@@ -1032,8 +1084,8 @@ function openUnit(pc) {
   openSheet(`
     <h3>${isNew ? (pc != null ? `PC${esc(pc)}（未登録）を追加` : 'PCを追加') : `PC ${esc(u.pc)}`}</h3>
     ${isNew ? `<label>PC番号<input id="u-pc" inputmode="numeric" value="${esc(u.pc)}"></label>` : ''}
-    <label>YRL番号<input id="u-yrl" value="${esc(u.yrl)}" placeholder="01-0000000" autocomplete="off"></label>
-    <label>発送伝票番号<input id="u-slip" value="${esc(u.slip)}" inputmode="numeric" placeholder="0000-0000-0000" autocomplete="off"></label>
+    <label>YRL番号<span class="row"><input id="u-yrl" value="${esc(u.yrl)}" placeholder="01-0000000" autocomplete="off"><button type="button" class="btn cam" data-scan="yrl">📷</button></span></label>
+    <label>発送伝票番号<span class="row"><input id="u-slip" value="${esc(u.slip)}" inputmode="numeric" placeholder="0000-0000-0000" autocomplete="off"><button type="button" class="btn cam" data-scan="slip">📷</button></span></label>
     <div id="u-warn" class="warnbox hidden"></div>
     <label>作業者<select id="u-worker"><option value="">（未割当）</option>${workers.map((w) => `<option ${w === u.worker ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select></label>
     <div class="lbl">ステータス</div>
@@ -1081,6 +1133,21 @@ function openUnit(pc) {
     };
     sh.addEventListener('input', check);
     $('#u-slip').addEventListener('blur', (e) => { e.target.value = normSlip(e.target.value); });
+    sh.querySelectorAll('[data-scan]').forEach((b) => b.addEventListener('click', (e) => {
+      e.preventDefault();
+      const kind = b.dataset.scan;
+      openScanner({
+        title: `${SCAN_KIND_LABEL[kind]}を読み取る`,
+        cfg: S.cfg,
+        onScan: (p) => {
+          if (p.kind !== kind) return { ok: false, msg: `${p.kind ? SCAN_KIND_LABEL[p.kind] : 'ほかのバーコード'}です（${p.value}）。${SCAN_KIND_LABEL[kind]}を読んでください` };
+          const inp = $(kind === 'yrl' ? '#u-yrl' : '#u-slip');
+          inp.value = p.value;
+          check();
+          return { ok: true, msg: p.value };
+        },
+      });
+    }));
     check();
     $('#u-save').onclick = () => {
       const p = isNew ? parsePc($('#u-pc').value) : u.pc;
