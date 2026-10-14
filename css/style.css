@@ -400,3 +400,5 @@ label > .row input { margin: 0; }
 .bal.ng { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
 .bal b { font-size: 16px; }
 .mono { font-variant-numeric: tabular-nums; word-break: break-all; }
+.bal.maybe { background: color-mix(in srgb, var(--primary) 10%, transparent); color: var(--primary); }
+.bal .small { font-size: 12px; opacity: .85; margin-top: 2px; }

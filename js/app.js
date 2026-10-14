@@ -10,7 +10,7 @@ import {
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 import { openScanner } from './scanner.js';
 
-const APP_VERSION = '2026-10-14d';
+const APP_VERSION = '2026-10-14e';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -1404,7 +1404,7 @@ function openRenumber(oldPc) {
     <h3>PC${esc(oldPc)} の番号を変更</h3>
     <p class="small">伝票 ${esc(u.slip || '—')}・YRL ${esc(u.yrl || '—')}・${esc(STATUS_LABEL[u.status])}</p>
     <label>正しいPC番号<input id="rn-pc" inputmode="numeric" autocomplete="off" list="rn-list"></label>
-    <datalist id="rn-list">${missingPcNumbers(S.units, S.cfg).map((n) => `<option value="${n}">未登録の番号</option>`).join('')}</datalist>
+    <datalist id="rn-list">${getBalance().gaps.map((n) => `<option value="${n}">飛んでいる番号</option>`).join('')}${getBalance().tail.slice(0, 200).map((n) => `<option value="${n}">未登録（老番）</option>`).join('')}</datalist>
     ${balanceLine()}
     <div id="rn-info" class="rg-info-l small"></div>
     <p class="muted small">変更先がすでに登録されている場合（YRLだけ入っている台など）は、空欄を補い合って1台にまとめます。番号が食い違う場合は変更しません。</p>
@@ -1963,12 +1963,18 @@ async function exportXLSX() {
   }
 }
 
-// 仮番号と未登録番号の突き合わせ（1行）
+// 仮番号と「飛んでいる番号」の突き合わせ（1行）
+const getBalance = () => numberBalance(S.units, S.cfg, S.cfg.checkUpTo);
 function balanceLine() {
-  const b = numberBalance(S.units, S.cfg);
-  if (!b.temps.length && !b.missing.length) return '';
-  return `<div class="bal ${b.ok ? 'ok' : 'ng'}">${b.ok ? '✅' : '⚠'} 仮番号 <b>${b.temps.length}</b>台 ／ ${S.cfg.pcMin}〜${S.cfg.pcMax}の未登録 <b>${b.missing.length}</b>個
-    ${b.ok ? '→ 一致' : `→ ${b.diff > 0 ? `仮番号が${b.diff}台多い` : `仮番号が${-b.diff}台足りない`}`}</div>`;
+  const b = getBalance();
+  if (!b.temps.length && !b.gaps.length) return '';
+  const range = `${S.cfg.pcMin}〜${b.limit}`;
+  let verdict;
+  if (b.ok) verdict = '→ 一致';
+  else if (b.diff < 0) verdict = `→ 仮番号が${-b.diff}台足りない`;
+  else verdict = `→ 仮番号が${b.diff}台多い${b.maybeTail ? `（${b.limit + 1}以降の老番の可能性）` : ''}`;
+  return `<div class="bal ${b.ok ? 'ok' : b.maybeTail ? 'maybe' : 'ng'}">${b.ok ? '✅' : '⚠'} 仮番号 <b>${b.temps.length}</b>台 ／ ${range}で飛んでいる番号 <b>${b.gaps.length}</b>個 ${verdict}
+    ${b.tail.length ? `<div class="small">${b.limit + 1}〜${S.cfg.pcMax}の${b.tail.length}個は、まだ登録していない老番として除外</div>` : ''}</div>`;
 }
 
 // ================= 進捗 =================
@@ -2048,6 +2054,13 @@ function renderHistory() {
 
   $('#h-reload').onclick = loadHistory;
   $('#tab-history').querySelectorAll('[data-open-pc]').forEach((tr) => (tr.onclick = () => openUnit(tr.dataset.openPc)));
+  $('#nb-upto')?.addEventListener('change', (e) => {
+    const v = e.target.value.trim();
+    S.cfg.checkUpTo = v === '' ? null : Number(v);
+    S.store.setConfig({ checkUpTo: S.cfg.checkUpTo });
+    renderHistory();
+  });
+  $('#nb-auto')?.addEventListener('click', () => { S.cfg.checkUpTo = null; S.store.setConfig({ checkUpTo: null }); renderHistory(); });
   $('#h-plan').onclick = openPlanEditor;
   $('#tab-history').querySelector('tbody')?.addEventListener('click', (e) => {
     const tr = e.target.closest('[data-day]');
@@ -2115,13 +2128,19 @@ function drawBurn(box, ps) {
 }
 
 function numberCard() {
-  const b = numberBalance(S.units, S.cfg);
+  const b = getBalance();
   if (!b.temps.length && !b.missing.length) return '';
   return `<div class="card">
     <div class="card-h"><h2>PC番号の確認</h2></div>
     ${balanceLine()}
-    <p class="muted small">PC番号が分からない台（仮番号）の数と、${S.cfg.pcMin}〜${S.cfg.pcMax}で抜けている番号の数が同じなら、全台そろっています。</p>
-    <details><summary>未登録の番号 ${b.missing.length}個</summary><p class="small mono">${esc(compactRanges(b.missing)) || 'なし'}</p></details>
+    <p class="muted small">PC番号が分からない台（仮番号）の数と、登録済みの番号の間で飛んでいる番号の数が同じなら、全台そろっています。まだ登録していない老番（後ろの番号）は数えません。</p>
+    <div class="row wrap">
+      <label class="pdate-l">確認する範囲の上限<input id="nb-upto" type="number" inputmode="numeric" placeholder="自動（${b.auto ? b.limit : '登録済みの最大番号'}）" value="${esc(S.cfg.checkUpTo ?? '')}"></label>
+      <button class="btn sm" id="nb-auto">自動に戻す</button>
+    </div>
+    <p class="muted small">自動では、登録済みの最大番号（今は${b.limit}）までを確認します。作業済みの範囲が分かっているときは、上限を入れてください。</p>
+    <details><summary>飛んでいる番号 ${b.gaps.length}個</summary><p class="small mono">${esc(compactRanges(b.gaps)) || 'なし'}</p></details>
+    ${b.tail.length ? `<details><summary>まだ登録していない老番 ${b.tail.length}個</summary><p class="small mono">${esc(compactRanges(b.tail))}</p></details>` : ''}
     <details><summary>仮番号の台 ${b.temps.length}台</summary>
       <div class="table-wrap"><table class="plan">${b.temps.map((u) => `<tr data-open-pc="${esc(u.pc)}"><td><b>仮${esc(u.pc)}</b></td><td>${esc(u.slip || '—')}</td><td>${esc(u.yrl || '—')}</td><td>${statusBadge(u.status)}</td></tr>`).join('')}</table></div>
     </details>

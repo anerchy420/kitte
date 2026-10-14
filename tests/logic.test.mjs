@@ -424,14 +424,18 @@ test('仮番号と、PC番号の付け替え（まとめる）', async () => {
   assert.equal(planRenumber(1, 301, units).ok, false);
 });
 
-test('仮番号の数と未登録番号の数の突き合わせ', async () => {
+test('仮番号の数と飛んでいる番号の数の突き合わせ（老番は除外）', async () => {
   const { numberBalance } = await import('../js/logic.js');
-  const cfg = { ...DEFAULT_CONFIG, pcMin: 160, pcMax: 165 };
+  const cfg = { ...DEFAULT_CONFIG, pcMin: 160, pcMax: 170 };
+  // 登録済み 160,162,163,165 → 飛んでいる番号は 161,164。166〜170 は老番（未作業）
   const units = { 160: { pc: 160 }, 162: { pc: 162 }, 163: { pc: 163 }, 165: { pc: 165 }, 1: { pc: 1 }, 2: { pc: 2 } };
   let b = numberBalance(units, cfg);
-  assert.deepEqual(b.missing, [161, 164]);
-  assert.equal(b.temps.length, 2);
+  assert.deepEqual(b.gaps, [161, 164]);
+  assert.deepEqual(b.tail, [166, 167, 168, 169, 170]);
+  assert.equal(b.limit, 165);
   assert.equal(b.ok, true);
-  b = numberBalance({ ...units, 3: { pc: 3 } }, cfg);
-  assert.deepEqual([b.ok, b.diff], [false, 1]);
+  b = numberBalance({ ...units, 3: { pc: 3 } }, cfg); // 仮番号が1台多い → 老番の可能性
+  assert.deepEqual([b.ok, b.diff, b.maybeTail], [false, 1, true]);
+  b = numberBalance(units, cfg, 170); // 上限を手で指定（全範囲）
+  assert.deepEqual([b.gaps.length, b.diff, b.ok], [7, -5, false]);
 });

@@ -20,6 +20,7 @@ export const DEFAULT_CONFIG = {
   overtimeLimit: '22:00',
   projectTotal: 0, // 総台数（0なら計画の最終累計か登録台数）
   plan: [], // 日別計画 [{ d, t, c?, h? }]
+  checkUpTo: null, // PC番号の確認範囲の上限（null=登録済みの最大番号）
   breaks: '12:00-13:00',
   pcMin: 160,
   pcMax: 660,
@@ -917,9 +918,22 @@ export function planRenumber(oldPc, newPc, units, { me = '', now = Date.now() } 
   return { ok: true, merged: !!to, pc: n, ups: { [oldPc]: null, [n]: merged }, msg: to ? `PC${oldPc}をPC${n}にまとめました` : `PC${oldPc}をPC${n}に変更しました` };
 }
 
-// 仮番号の台数と、範囲内の未登録番号の数を突き合わせる（一致すれば全台そろっている）
-export function numberBalance(units, cfg = DEFAULT_CONFIG) {
+// 仮番号の台数と、範囲内で「飛んでいる番号」の数を突き合わせる（一致すれば全台そろっている）
+// 老番（登録済みの最大番号より後ろ）はまだ作業していないだけかもしれないので、判定に入れない
+// upTo を指定すると、その番号までを確認範囲にする
+export function numberBalance(units, cfg = DEFAULT_CONFIG, upTo = null) {
   const temps = Object.values(units).filter((u) => isTempPc(u.pc, cfg)).sort((a, b) => a.pc - b.pc);
   const missing = missingPcNumbers(units, cfg);
-  return { temps, missing, diff: temps.length - missing.length, ok: temps.length === missing.length };
+  const regs = Object.keys(units).map(Number).filter((n) => n >= Number(cfg.pcMin) && n <= Number(cfg.pcMax));
+  const auto = regs.length ? Math.max(...regs) : Number(cfg.pcMin) - 1;
+  const limit = upTo != null && upTo !== '' && Number.isFinite(Number(upTo)) ? Math.min(Number(upTo), Number(cfg.pcMax)) : auto;
+  const gaps = missing.filter((n) => n <= limit);
+  const tail = missing.filter((n) => n > limit);
+  const diff = temps.length - gaps.length;
+  return {
+    temps, missing, gaps, tail, limit, auto: upTo == null || upTo === '', diff,
+    ok: diff === 0,
+    // 仮番号が多いが、老番に入る分で説明がつく
+    maybeTail: diff > 0 && diff <= tail.length,
+  };
 }
