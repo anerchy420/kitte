@@ -4,13 +4,13 @@ import {
   textToTable, guessMapping, looksLikeHeader, rowsToRecords, planImport, buildImportUpdates,
   weekdayLabel, parsePlanText, normalizePlan, progressTable, planSummary, planCarry, dayBase,
   buildRestoreUpdates,
-  parseScan, SCAN_KIND_LABEL, planRegister, extractSlips, reconcileShipped,
+  parseScan, SCAN_KIND_LABEL, planRegister, extractSlips, reconcileShipped, missingPcNumbers, compactRanges,
   statusSideEffects, buildEditUpdates, formatReport, matchNumbers, shippedOn, shipDateOf, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 import { openScanner } from './scanner.js';
 
-const APP_VERSION = '2026-10-14a';
+const APP_VERSION = '2026-10-14b';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -1227,16 +1227,20 @@ function renderReconcile() {
   let body = '';
   if (res) {
     body = `
-      <p class="small">読み取った伝票番号 <b>${res.total}</b>件${res.dupCount ? `（重複${res.dupCount}件を除いて${res.unique}件）` : ''}</p>
+      <p class="small">レシート等の伝票番号 <b>${res.unique}</b>件${res.dupCount ? `（重複${res.dupCount}件を除く）` : ''} ／ アプリで発送済み <b>${Object.values(S.units).filter((u) => u.status === 'shipped').length}</b>台</p>
+      <details class="rc-sec bad" ${res.unknown.length ? 'open' : ''} data-sec="unknown">
+        <summary><b>⚠ 登録しないまま発送（リストにあるがアプリにない）</b> <span class="chip ${res.unknown.length ? 'a-error' : ''}">${res.unknown.length}</span></summary>
+        <p class="muted small">アプリに登録されていない伝票番号です。「登録する」でPC番号を選ぶと、この伝票番号を入れて発送済みにします。アプリ側に1桁違いの伝票番号がある場合は、入力ミスとして直せます。</p>
+        ${res.unknown.length ? `<div class="row wrap"><button class="btn sm" data-rc-copy="unknown">コピー</button></div>
+        <div class="table-wrap"><table class="plan">${res.unknown.map((x) => `<tr>
+          <td><b>${esc(x.slip)}</b></td>
+          <td>${x.suggest.map((u) => `<div class="rc-sug">アプリのPC${esc(u.pc)}が <b>${esc(u.slip)}</b>（${esc(STATUS_LABEL[u.status])}）<br><button class="btn sm" data-fix="${esc(u.pc)}" data-slip="${esc(x.slip)}">PC${esc(u.pc)}の伝票をこの番号に直す</button></div>`).join('')}
+            <button class="btn sm primary" data-reg-slip="${esc(x.slip)}">登録する</button></td></tr>`).join('')}</table></div>` : ''}
+      </details>
       ${section('wrong', '⚠ 発送済みだがリストにない', res.wrongShipped, 'bad', '誤って発送済みにした可能性があります。確認して、違っていればチェックして戻してください。',
         `<button class="btn sm danger" id="rc-unship">チェックした台を梱包済みに戻す</button>`, false)}
       ${section('missing', '⚠ リストにあるが発送済みになっていない', res.notShipped, 'bad', '発送登録の漏れの可能性があります。',
         `<label class="pdate-l small">発送日<input type="date" id="rc-date" value="${R.date}"></label><button class="btn sm primary" id="rc-ship">チェックした台を発送済みにする</button>`, true)}
-      <details class="rc-sec bad" ${res.unknown.length ? 'open' : ''}>
-        <summary><b>⚠ リストにあるが登録なし</b> <span class="chip ${res.unknown.length ? 'a-error' : ''}">${res.unknown.length}</span></summary>
-        <p class="muted small">アプリに登録されていない伝票番号です。書き写し間違いの可能性がある場合は「もしかして」を表示します。</p>
-        ${res.unknown.length ? `<div class="row wrap"><button class="btn sm" data-rc-copy="unknown">コピー</button></div><div class="table-wrap"><table class="plan">${res.unknown.map((x) => `<tr><td>${esc(x.slip)}</td><td>${x.suggest.length ? x.suggest.map((u) => `もしかして <a href="#" data-open="${esc(u.pc)}">PC${esc(u.pc)}（${esc(u.slip)}・${esc(STATUS_LABEL[u.status])}）</a>`).join('<br>') : '<span class="muted">候補なし</span>'}</td></tr>`).join('')}</table></div>` : ''}
-      </details>
       ${section('noslip', '⚠ 伝票番号なしで発送済み', res.noSlipShipped, 'bad', '発送済みなのに伝票番号が入っていません。伝票番号を入れるか、ステータスを確認してください。', '', null)}
       ${section('ok', '✅ 一致（発送済み・リストにあり）', res.ok, 'good', '問題ありません。')}`;
   }
@@ -1274,6 +1278,19 @@ function renderReconcile() {
     toast(`${n}台を発送済みにしました`);
     redo();
   });
+  box.querySelectorAll('[data-reg-slip]').forEach((b) => (b.onclick = () => openShipRegister(b.dataset.regSlip, () => redo())));
+  box.querySelectorAll('[data-fix]').forEach((b) => (b.onclick = () => {
+    const u = S.units[b.dataset.fix];
+    const slip = b.dataset.slip;
+    if (!u) return;
+    if (!confirm(`PC${u.pc}の伝票番号を\n${u.slip} → ${slip}\nに直し、発送済み（発送日 ${R.date}）にします。よろしいですか？`)) return;
+    const now = Date.now();
+    const ch = { slip, ...(u.status !== 'shipped' ? { status: 'shipped', ...statusSideEffects(u, 'shipped', R.date, u.worker || S.me) } : {}), updatedAt: now, updatedBy: S.me };
+    S.store.setUnits({ [u.pc]: ch });
+    S.store.addLog(S.today, logEntries([{ pc: u.pc, msg: `PC${u.pc}の伝票番号を${u.slip}→${slip}に修正` }]));
+    toast(`PC${u.pc}を直しました`);
+    redo();
+  }));
   box.querySelectorAll('[data-rc-list]').forEach((b) => (b.onclick = () => showListWith({ pcs: new Set(lists[b.dataset.rcList].map((u) => String(u.pc))) })));
   box.querySelectorAll('[data-rc-copy]').forEach((b) => (b.onclick = () => {
     const k = b.dataset.rcCopy;
@@ -1284,6 +1301,62 @@ function renderReconcile() {
     if (a) { e.preventDefault(); openUnit(a.dataset.open); return; }
     const tr = e.target.closest('tr[data-pc]');
     if (tr && !e.target.matches('input')) openUnit(tr.dataset.pc);
+  });
+}
+
+// 登録しないまま発送した伝票を、PCに割り当てて発送済みにする
+function openShipRegister(slip, done) {
+  const R = S.rc || {};
+  const free = Object.values(S.units).filter((u) => !u.slip && u.status !== 'shipped').sort((a, b) => a.pc - b.pc);
+  const missing = missingPcNumbers(S.units, S.cfg);
+  const workers = allWorkers();
+  openSheet(`
+    <h3>伝票 ${esc(slip)} を登録</h3>
+    <label>PC番号<input id="sr-pc" inputmode="numeric" list="sr-list" autocomplete="off" placeholder="番号を入力 or 下から選ぶ"></label>
+    <datalist id="sr-list">${free.map((u) => `<option value="${esc(u.pc)}">伝票なし・${esc(STATUS_LABEL[u.status])}${u.worker ? '・' + esc(u.worker) : ''}</option>`).join('')}${missing.slice(0, 300).map((n) => `<option value="${n}">未登録の番号</option>`).join('')}</datalist>
+    ${free.length ? `<div class="lbl">伝票番号が未入力の台（発送前）</div><div class="chips static sr-chips">${free.slice(0, 40).map((u) => `<button type="button" class="chip" data-pick="${esc(u.pc)}">${esc(u.pc)}</button>`).join('')}${free.length > 40 ? `<span class="muted small">ほか${free.length - 40}台</span>` : ''}</div>` : ''}
+    ${missing.length ? `<p class="muted small">未登録のPC番号：${missing.length}個（${esc(compactRanges(missing))}）</p>` : ''}
+    <div id="sr-info" class="rg-info-l small"></div>
+    <label>YRL番号（分かれば）<span class="row"><input id="sr-yrl" autocomplete="off" placeholder="01-0000000"><button type="button" class="btn cam" id="sr-cam">📷</button></span></label>
+    <div class="row wrap">
+      <label class="grow">作業者<select id="sr-w"><option value="">（自分：${esc(S.me)}）</option>${workers.map((w) => `<option>${esc(w)}</option>`).join('')}</select></label>
+      <label class="grow">発送日<input type="date" id="sr-date" value="${esc(R.date || S.today)}"></label>
+    </div>
+    <div class="sheet-actions"><button class="btn" data-close>キャンセル</button><button class="btn primary" id="sr-save">登録して発送済みにする</button></div>`, (sh) => {
+    sh.querySelector('[data-close]').onclick = closeSheet;
+    const info = () => {
+      const pc = parsePc($('#sr-pc').value);
+      const u = pc != null ? S.units[pc] : null;
+      const el = $('#sr-info');
+      if (pc == null) { el.textContent = ''; return; }
+      if (!u) el.textContent = `PC${pc}を新規登録して、発送済みにします`;
+      else if (u.slip && u.slip !== slip) el.textContent = `⚠ PC${pc}には別の伝票番号（${u.slip}）が入っています`;
+      else el.textContent = `PC${pc}（${STATUS_LABEL[u.status]}${u.yrl ? '・YRL ' + u.yrl : ''}）にこの伝票番号を入れて発送済みにします`;
+      if (u?.yrl && !$('#sr-yrl').value) $('#sr-yrl').placeholder = u.yrl;
+    };
+    $('#sr-pc').addEventListener('input', info);
+    sh.querySelectorAll('[data-pick]').forEach((b) => (b.onclick = () => { $('#sr-pc').value = b.dataset.pick; info(); }));
+    $('#sr-cam').onclick = () => openScanner({
+      title: 'YRL番号を読み取る', target: 'YRLラベル（01-0000000 のシール）', cfg: S.cfg,
+      onScan: (p) => {
+        if (p.kind !== 'yrl') return { ok: false, msg: `YRLラベルを読んでください（${p.value}）` };
+        $('#sr-yrl').value = p.value;
+        return { ok: true, msg: p.value };
+      },
+    });
+    $('#sr-save').onclick = () => {
+      const date = $('#sr-date').value || S.today;
+      const w = $('#sr-w').value;
+      const plan = planRegister({ pc: $('#sr-pc').value, yrl: $('#sr-yrl').value.trim(), slip }, S.units, { status: 'shipped', date, me: w || S.me });
+      if (!plan.ok) return toast(plan.msg, 'warn');
+      if (!Object.keys(plan.ups).length) return toast(plan.msg);
+      if (!confirm(`${plan.msg.replace('しました', 'します')}（伝票 ${slip}・発送日 ${date}）。よろしいですか？`)) return;
+      S.store.setUnits(plan.ups);
+      S.store.addLog(S.today, logEntries([{ pc: plan.pc, msg: `${plan.msg}（未登録で発送：伝票${slip}）` }]));
+      closeSheet();
+      toast(plan.msg);
+      done?.();
+    };
   });
 }
 

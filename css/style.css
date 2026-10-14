@@ -389,3 +389,6 @@ label > .row input { margin: 0; }
 .rc-ck { width: 20px; height: 20px; }
 .list-row3 .pdate-l { flex: 1 1 100%; }
 .list-row3 .btn { flex: 1; }
+.rc-sug { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dashed var(--line); }
+.sr-chips .chip { padding: 4px 10px; }
+.rg-info-l { color: var(--primary); min-height: 18px; margin: 4px 0; }

@@ -853,3 +853,22 @@ export function reconcileShipped(text, units) {
   const noSlipShipped = shipped.filter((u) => !u.slip).sort(byPc);
   return { total: slips.length, unique: listed.size, dupCount, ok: ok.sort(byPc), notShipped: notShipped.sort(byPc), unknown, wrongShipped, noSlipShipped, listed };
 }
+
+// PC番号の範囲内で、まだ登録されていない番号
+export function missingPcNumbers(units, cfg = DEFAULT_CONFIG) {
+  const have = new Set(Object.keys(units).map(Number));
+  const out = [];
+  for (let n = Number(cfg.pcMin); n <= Number(cfg.pcMax); n++) if (!have.has(n)) out.push(n);
+  return out;
+}
+// [1,2,3,7,9,10] → "1-3, 7, 9-10"
+export function compactRanges(nums) {
+  const r = [];
+  for (let i = 0; i < nums.length; i++) {
+    let j = i;
+    while (j + 1 < nums.length && nums[j + 1] === nums[j] + 1) j++;
+    r.push(i === j ? `${nums[i]}` : `${nums[i]}-${nums[j]}`);
+    i = j;
+  }
+  return r.join(', ');
+}

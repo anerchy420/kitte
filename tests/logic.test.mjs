@@ -379,3 +379,19 @@ test('発送チェック：誤って発送済み・発送漏れ・未登録（�
   assert.equal(r.unknown.length, 1);
   assert.deepEqual(r.unknown[0].suggest.map((u) => u.pc), [197]); // 8336 ⇔ 8363 の入れ替え
 });
+
+test('未登録のPC番号・範囲の短縮表記・未登録で発送した伝票の登録', async () => {
+  const { missingPcNumbers, compactRanges, planRegister } = await import('../js/logic.js');
+  const units = { 160: { pc: 160 }, 161: { pc: 161 }, 163: { pc: 163, slip: '', status: 'packed', yrl: '01-0000163', packedDate: '2026-10-09' } };
+  const miss = missingPcNumbers(units, { pcMin: 160, pcMax: 166 });
+  assert.deepEqual(miss, [162, 164, 165, 166]);
+  assert.equal(compactRanges(miss), '162, 164-166');
+  // 既存（伝票なし・梱包済み）に割り当て → 発送済み、梱包日は維持
+  const r = planRegister({ pc: 163, slip: '3912-1418-8336' }, units, { status: 'shipped', date: '2026-10-12', me: '根本' });
+  assert.equal(r.ups[163].status, 'shipped');
+  assert.equal(r.ups[163].shippedDate, '2026-10-12');
+  assert.equal(r.ups[163].packedDate, undefined);
+  // 新規 → 発送済み（梱包日＝発送日）
+  const r2 = planRegister({ pc: 164, slip: '3912-1418-8337' }, units, { status: 'shipped', date: '2026-10-12', me: '根本' });
+  assert.deepEqual([r2.isNew, r2.ups[164].status, r2.ups[164].packedDate, r2.ups[164].shippedDate], [true, 'shipped', '2026-10-12', '2026-10-12']);
+});
