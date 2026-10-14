@@ -4,13 +4,13 @@ import {
   textToTable, guessMapping, looksLikeHeader, rowsToRecords, planImport, buildImportUpdates,
   weekdayLabel, parsePlanText, normalizePlan, progressTable, planSummary, planCarry, dayBase,
   buildRestoreUpdates,
-  parseScan, SCAN_KIND_LABEL, planRegister,
+  parseScan, SCAN_KIND_LABEL, planRegister, extractSlips, reconcileShipped,
   statusSideEffects, buildEditUpdates, formatReport, matchNumbers, shippedOn, shipDateOf, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 import { openScanner } from './scanner.js';
 
-const APP_VERSION = '2026-10-10g';
+const APP_VERSION = '2026-10-14a';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -638,12 +638,13 @@ function renderListShell() {
         <button id="l-select" class="btn ${L.select ? 'on' : ''}">選択</button>
       </div>
       <select id="l-imp"></select>
-      <div class="row">
+      <div class="row wrap list-row3">
         <label class="pdate-l">梱包日<input id="l-pdate" type="date" value="${esc(L.pdate)}"></label>
         <button id="l-grid" class="btn">表で編集</button>
+        <button id="l-slipf" class="btn" title="伝票番号リストで絞り込み">伝票リスト</button>
       </div>
     </div>
-    ${L.pcs ? `<div class="filter-chip">照合結果 ${L.pcs.size}台で絞り込み中 <button class="btn sm" id="l-pcs-clear">解除</button></div>` : ''}
+    ${L.pcs ? `<div class="filter-chip">${esc(L.pcsLabel || '照合結果')} ${L.pcs.size}台で絞り込み中 <button class="btn sm" id="l-pcs-clear">解除</button></div>` : ''}
     <div id="l-bulk" class="bulk hidden"></div>
     <div id="l-body"></div>`;
   $('#l-worker').value = L.worker;
@@ -653,7 +654,8 @@ function renderListShell() {
   $('#l-sort').addEventListener('change', (e) => { L.sort = e.target.value; renderListBody(); });
   $('#l-select').addEventListener('click', () => { L.select = !L.select; L.selected.clear(); $('#l-select').classList.toggle('on', L.select); renderListBody(); });
   $('#l-add').addEventListener('click', () => openUnit(null));
-  $('#l-pcs-clear')?.addEventListener('click', () => { L.pcs = null; renderListShell(); });
+  $('#l-pcs-clear')?.addEventListener('click', () => { L.pcs = null; L.pcsLabel = ''; renderListShell(); });
+  $('#l-slipf').addEventListener('click', openSlipFilter);
   $('#l-imp').addEventListener('change', (e) => { L.imp = e.target.value; renderListBody(); });
   $('#l-pdate').addEventListener('change', (e) => { L.pdate = e.target.value; renderListBody(); });
   $('#l-grid').addEventListener('click', () => {
@@ -923,7 +925,7 @@ function openGrid(list) {
 }
 
 function showListWith(filter) {
-  Object.assign(S.list, { q: '', status: 'all', worker: 'all', imp: '', pdate: '', pcs: null, select: false, limit: 200 }, filter);
+  Object.assign(S.list, { q: '', status: 'all', worker: 'all', imp: '', pdate: '', pcs: null, pcsLabel: '', select: false, limit: 200 }, filter);
   S.list.selected.clear();
   switchTab('list');
 }
@@ -1207,6 +1209,112 @@ function renderShipLog() {
     ${l.ok && !l.undone ? `<button class="btn sm" data-undo="${i}">取消</button>` : l.undone ? '<small class="muted">取消済</small>' : ''}</li>`).join('')}</ul>` : '';
 }
 
+// ================= 発送チェック =================
+function renderReconcile() {
+  const box = $('#rc-box');
+  if (!box) return;
+  const R = (S.rc ||= { text: '', date: S.today, res: null });
+  const res = R.res;
+  const row = (u, chk) => `<tr data-pc="${esc(u.pc)}">${chk != null ? `<td><input type="checkbox" class="rc-ck" value="${esc(u.pc)}" ${chk ? 'checked' : ''}></td>` : ''}
+    <td><b>${esc(u.pc)}</b></td><td>${esc(u.slip || '—')}</td><td>${statusBadge(u.status)}${shipDateOf(u) ? ` <small class="muted">${esc(shipDateOf(u).slice(5))}</small>` : ''}</td><td class="muted">${esc(u.worker || '')}</td></tr>`;
+  const section = (key, title, list, cls, desc, actions = '', chk = null) => `
+    <details class="rc-sec ${cls}" ${list.length && cls !== 'good' ? 'open' : ''} data-sec="${key}">
+      <summary><b>${title}</b> <span class="chip ${list.length ? (cls === 'good' ? 'a-new' : 'a-error') : ''}">${list.length}</span></summary>
+      <p class="muted small">${desc}</p>
+      ${list.length ? `<div class="row wrap">${actions}<button class="btn sm" data-rc-list="${key}">一覧で表示</button><button class="btn sm" data-rc-copy="${key}">コピー</button></div>
+      <div class="table-wrap"><table class="plan">${list.map((u) => row(u, chk)).join('')}</table></div>` : ''}
+    </details>`;
+  let body = '';
+  if (res) {
+    body = `
+      <p class="small">読み取った伝票番号 <b>${res.total}</b>件${res.dupCount ? `（重複${res.dupCount}件を除いて${res.unique}件）` : ''}</p>
+      ${section('wrong', '⚠ 発送済みだがリストにない', res.wrongShipped, 'bad', '誤って発送済みにした可能性があります。確認して、違っていればチェックして戻してください。',
+        `<button class="btn sm danger" id="rc-unship">チェックした台を梱包済みに戻す</button>`, false)}
+      ${section('missing', '⚠ リストにあるが発送済みになっていない', res.notShipped, 'bad', '発送登録の漏れの可能性があります。',
+        `<label class="pdate-l small">発送日<input type="date" id="rc-date" value="${R.date}"></label><button class="btn sm primary" id="rc-ship">チェックした台を発送済みにする</button>`, true)}
+      <details class="rc-sec bad" ${res.unknown.length ? 'open' : ''}>
+        <summary><b>⚠ リストにあるが登録なし</b> <span class="chip ${res.unknown.length ? 'a-error' : ''}">${res.unknown.length}</span></summary>
+        <p class="muted small">アプリに登録されていない伝票番号です。書き写し間違いの可能性がある場合は「もしかして」を表示します。</p>
+        ${res.unknown.length ? `<div class="row wrap"><button class="btn sm" data-rc-copy="unknown">コピー</button></div><div class="table-wrap"><table class="plan">${res.unknown.map((x) => `<tr><td>${esc(x.slip)}</td><td>${x.suggest.length ? x.suggest.map((u) => `もしかして <a href="#" data-open="${esc(u.pc)}">PC${esc(u.pc)}（${esc(u.slip)}・${esc(STATUS_LABEL[u.status])}）</a>`).join('<br>') : '<span class="muted">候補なし</span>'}</td></tr>`).join('')}</table></div>` : ''}
+      </details>
+      ${section('noslip', '⚠ 伝票番号なしで発送済み', res.noSlipShipped, 'bad', '発送済みなのに伝票番号が入っていません。伝票番号を入れるか、ステータスを確認してください。', '', null)}
+      ${section('ok', '✅ 一致（発送済み・リストにあり）', res.ok, 'good', '問題ありません。')}`;
+  }
+  box.innerHTML = `
+    <div class="card-h"><h2>発送チェック</h2>${res ? '<button class="link" id="rc-clear">クリア</button>' : ''}</div>
+    <p class="muted small">これまでに発送した全ての伝票番号（書き写したもの・報告メール・Excelのコピーなど）を貼り付けると、アプリ上の「発送済み」と突き合わせます。</p>
+    <textarea id="rc-text" rows="${res ? 3 : 6}" placeholder="3912-1418-8330&#10;391214188341&#10;≪194≫　≪01-0973401≫　≪3912-1418-8330≫ …">${esc(R.text)}</textarea>
+    <button class="btn block" id="rc-go">チェックする</button>
+    ${body}`;
+  $('#rc-text').oninput = (e) => { R.text = e.target.value; };
+  $('#rc-go').onclick = () => {
+    R.text = $('#rc-text').value;
+    R.res = reconcileShipped(R.text, S.units);
+    if (!R.res.total) toast('伝票番号（12桁）が見つかりませんでした', 'warn');
+    renderReconcile();
+  };
+  $('#rc-clear')?.addEventListener('click', () => { S.rc = null; renderReconcile(); });
+  if (!res) return;
+  const lists = { wrong: res.wrongShipped, missing: res.notShipped, noslip: res.noSlipShipped, ok: res.ok };
+  const checked = (key) => [...box.querySelectorAll(`[data-sec="${key}"] .rc-ck:checked`)].map((c) => c.value);
+  const redo = () => { setTimeout(() => { R.res = reconcileShipped(R.text, S.units); renderReconcile(); }, 80); };
+  $('#rc-unship')?.addEventListener('click', () => {
+    const pcs = checked('wrong');
+    if (!pcs.length) return toast('戻す台にチェックを入れてください', 'warn');
+    if (!confirm(`${pcs.length}台を「梱包済み」に戻します（発送日は消えます）。よろしいですか？`)) return;
+    changeStatus(pcs, 'packed');
+    redo();
+  });
+  $('#rc-date')?.addEventListener('change', (e) => { R.date = e.target.value || S.today; });
+  $('#rc-ship')?.addEventListener('click', () => {
+    const pcs = checked('missing');
+    if (!pcs.length) return toast('発送済みにする台にチェックを入れてください', 'warn');
+    if (!confirm(`${pcs.length}台を発送済み（発送日 ${R.date}）にします。よろしいですか？`)) return;
+    const n = shipUnits(pcs, R.date);
+    toast(`${n}台を発送済みにしました`);
+    redo();
+  });
+  box.querySelectorAll('[data-rc-list]').forEach((b) => (b.onclick = () => showListWith({ pcs: new Set(lists[b.dataset.rcList].map((u) => String(u.pc))) })));
+  box.querySelectorAll('[data-rc-copy]').forEach((b) => (b.onclick = () => {
+    const k = b.dataset.rcCopy;
+    copyText(k === 'unknown' ? res.unknown.map((x) => x.slip).join('\n') : lists[k].map((u) => `≪${u.pc}≫　≪${u.yrl || ''}≫　≪${u.slip || ''}≫`).join('\n'));
+  }));
+  box.addEventListener('click', (e) => {
+    const a = e.target.closest('[data-open]');
+    if (a) { e.preventDefault(); openUnit(a.dataset.open); return; }
+    const tr = e.target.closest('tr[data-pc]');
+    if (tr && !e.target.matches('input')) openUnit(tr.dataset.pc);
+  });
+}
+
+// 一覧：伝票番号リストで絞り込み（含む／含まない）
+function openSlipFilter() {
+  openSheet(`
+    <h3>伝票番号リストで絞り込み</h3>
+    <textarea id="sf-text" rows="8" placeholder="伝票番号を貼り付け（形式は自由・1行に何件でも）">${esc(S.slipFilterText || '')}</textarea>
+    <div class="seg two" id="sf-mode"><button type="button" data-m="in" class="on">リストに含まれる台</button><button type="button" data-m="out">含まれない台</button></div>
+    <p class="muted small">対象は伝票番号が入っている台です。「含まれない台」で発送済みに絞ると、誤って発送済みにした台を探せます。</p>
+    <div class="sheet-actions"><button class="btn" data-close>キャンセル</button><button class="btn primary" id="sf-go">絞り込む</button></div>`, (sh) => {
+    let mode = 'in';
+    sh.querySelector('[data-close]').onclick = closeSheet;
+    $('#sf-mode').onclick = (e) => {
+      const b = e.target.closest('[data-m]');
+      if (!b) return;
+      mode = b.dataset.m;
+      $('#sf-mode').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+    };
+    $('#sf-go').onclick = () => {
+      S.slipFilterText = $('#sf-text').value;
+      const set = new Set(extractSlips(S.slipFilterText));
+      if (!set.size) return toast('伝票番号（12桁）が見つかりませんでした', 'warn');
+      const pcs = Object.values(S.units).filter((u) => u.slip && (mode === 'in' ? set.has(u.slip) : !set.has(u.slip))).map((u) => String(u.pc));
+      closeSheet();
+      showListWith({ pcs: new Set(pcs), pcsLabel: `伝票リスト（${set.size}件）に${mode === 'in' ? '含まれる' : '含まれない'}` });
+      toast(`${pcs.length}台に絞り込みました`);
+    };
+  });
+}
+
 // ================= 1台の編集 =================
 function openUnit(pc) {
   const isNew = pc == null || !S.units[pc];
@@ -1331,6 +1439,7 @@ function renderIO() {
   const root = $('#tab-io');
   root.innerHTML = `
     <div class="card" id="mt-box"></div>
+    <div class="card" id="rc-box"></div>
 
     <div class="card">
       <div class="card-h"><h2>報告文（メール用）</h2></div>
@@ -1418,6 +1527,7 @@ function renderIO() {
   $('#rp-names').addEventListener('input', upd);
   upd();
   renderMatch();
+  renderReconcile();
   $('#rp-copy').onclick = () => copyText($('#rp-text').value);
   $('#rp-share').onclick = () => shareText($('#rp-text').value, `キッティング実績 ${io.reportDate}`);
   $('#rp-dl').onclick = () => download(`実績_${io.reportDate}${io.reportWorker ? '_' + io.reportWorker : ''}.txt`, $('#rp-text').value, 'text/plain');

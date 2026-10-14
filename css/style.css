@@ -379,3 +379,13 @@ label > .row input { margin: 0; }
 .scanner.with-panel .sc-view { min-height: 140px; flex-basis: 30vh; }
 .scanner.with-panel .sc-log { max-height: 12vh; }
 .scanner { overflow-y: auto; }
+
+/* 発送チェック */
+.rc-sec { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin: 8px 0; }
+.rc-sec.bad[open] { border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+.rc-sec summary { cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.rc-sec .row { margin: 6px 0; }
+.rc-sec .pdate-l { flex: 0 1 220px; }
+.rc-ck { width: 20px; height: 20px; }
+.list-row3 .pdate-l { flex: 1 1 100%; }
+.list-row3 .btn { flex: 1; }

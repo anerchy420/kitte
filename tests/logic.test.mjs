@@ -357,3 +357,25 @@ test('スキャン登録：新規・既存の空欄補完・重複や上書き�
   assert.equal(planRegister({ pc: '', yrl: '01-0973381' }, units, o).ok, false);
   assert.equal(planRegister({ pc: 327, slip: '3912-1418-9660' }, units, o).ups[327], undefined); // 変更なし
 });
+
+test('発送チェック：誤って発送済み・発送漏れ・未登録（書き間違い候補）', async () => {
+  const { reconcileShipped, extractSlips } = await import('../js/logic.js');
+  assert.deepEqual(extractSlips('3912-1418-8330\n391214188341 ／ ３９１２ １４１８ ８３５２\na391214190942a\n≪313≫　≪01-0973294≫　≪3912-1418-9520≫'),
+    ['3912-1418-8330', '3912-1418-8341', '3912-1418-8352', '3912-1419-0942', '3912-1418-9520']);
+  const units = {
+    194: { pc: 194, slip: '3912-1418-8330', status: 'shipped' }, // 一致
+    195: { pc: 195, slip: '3912-1418-8341', status: 'shipped' }, // リストにない → 誤発送の疑い
+    196: { pc: 196, slip: '3912-1418-8352', status: 'packed' }, // リストにあるが未発送
+    197: { pc: 197, slip: '3912-1418-8363', status: 'packed' }, // 書き間違い候補
+    198: { pc: 198, slip: '', status: 'shipped' }, // 伝票なしで発送済み
+  };
+  const r = reconcileShipped('3912-1418-8330\n3912-1418-8352\n3912-1418-8336\n3912-1418-8330', units);
+  assert.equal(r.total, 4);
+  assert.equal(r.dupCount, 1);
+  assert.deepEqual(r.ok.map((u) => u.pc), [194]);
+  assert.deepEqual(r.wrongShipped.map((u) => u.pc), [195]);
+  assert.deepEqual(r.notShipped.map((u) => u.pc), [196]);
+  assert.deepEqual(r.noSlipShipped.map((u) => u.pc), [198]);
+  assert.equal(r.unknown.length, 1);
+  assert.deepEqual(r.unknown[0].suggest.map((u) => u.pc), [197]); // 8336 ⇔ 8363 の入れ替え
+});

@@ -809,3 +809,47 @@ export function planRegister({ pc, yrl, slip }, units, { status = 'packed', date
   const base = isNew ? { pc: n, yrl: '', slip: '', worker: '', status: 'todo', packedDate: null, note: '', createdAt: now } : {};
   return { ok: true, isNew, pc: n, ups: { [n]: { ...base, ...ch, updatedAt: now, updatedBy: me } }, msg: `PC${n}を${isNew ? '新規登録' : '更新'}しました` };
 }
+
+// ---------- 発送チェック（伝票番号リストとの照合） ----------
+// 文字列から伝票番号（12桁、ハイフン・空白・Codabarの a…a あり）をすべて取り出す
+export function extractSlips(text) {
+  const t = normNum(text).replace(/[ａ-ｄＡ-Ｄ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+  const out = [];
+  const re = /(?<![\d-])[A-Da-d]?(\d{4})[-\s]?(\d{4})[-\s]?(\d{4})[A-Da-d]?(?![\d-])/g;
+  let m;
+  while ((m = re.exec(t))) out.push(`${m[1]}-${m[2]}-${m[3]}`);
+  return out;
+}
+// 書き写し間違いの候補：1桁違い、または隣り合う2桁の入れ替え
+function nearSlip(a, b) {
+  const x = a.replace(/-/g, '');
+  const y = b.replace(/-/g, '');
+  if (x.length !== y.length) return false;
+  const diff = [];
+  for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) diff.push(i);
+  if (diff.length === 1) return true;
+  return diff.length === 2 && diff[1] === diff[0] + 1 && x[diff[0]] === y[diff[1]] && x[diff[1]] === y[diff[0]];
+}
+export function reconcileShipped(text, units) {
+  const slips = extractSlips(text);
+  const listed = new Set(slips);
+  const dupCount = slips.length - listed.size;
+  const bySlip = new Map();
+  for (const u of Object.values(units)) if (u.slip) bySlip.set(u.slip, u);
+  const byPc = (a, b) => Number(a.pc) - Number(b.pc);
+  const ok = [];
+  const notShipped = [];
+  const unknown = [];
+  for (const s of listed) {
+    const u = bySlip.get(s);
+    if (!u) {
+      const suggest = Object.values(units).filter((x) => x.slip && !listed.has(x.slip) && nearSlip(s, x.slip));
+      unknown.push({ slip: s, suggest });
+    } else if (u.status === 'shipped') ok.push(u);
+    else notShipped.push(u);
+  }
+  const shipped = Object.values(units).filter((u) => u.status === 'shipped');
+  const wrongShipped = shipped.filter((u) => u.slip && !listed.has(u.slip)).sort(byPc);
+  const noSlipShipped = shipped.filter((u) => !u.slip).sort(byPc);
+  return { total: slips.length, unique: listed.size, dupCount, ok: ok.sort(byPc), notShipped: notShipped.sort(byPc), unknown, wrongShipped, noSlipShipped, listed };
+}
