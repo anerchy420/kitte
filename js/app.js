@@ -4,13 +4,13 @@ import {
   textToTable, guessMapping, looksLikeHeader, rowsToRecords, planImport, buildImportUpdates,
   weekdayLabel, parsePlanText, normalizePlan, progressTable, planSummary, planCarry, dayBase,
   buildRestoreUpdates,
-  parseScan, SCAN_KIND_LABEL, planRegister, extractSlips, reconcileShipped, missingPcNumbers, compactRanges,
+  parseScan, SCAN_KIND_LABEL, planRegister, extractSlips, reconcileShipped, missingPcNumbers, compactRanges, isTempPc, nextTempPc, planRenumber,
   statusSideEffects, buildEditUpdates, formatReport, matchNumbers, shippedOn, shipDateOf, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 import { openScanner } from './scanner.js';
 
-const APP_VERSION = '2026-10-14b';
+const APP_VERSION = '2026-10-14c';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -682,9 +682,10 @@ function filteredUnits() {
   if (L.imp) list = list.filter((u) => u.importId === L.imp);
   if (L.pdate) list = list.filter((u) => isDone(u.status) && u.packedDate === L.pdate);
   if (q) list = list.filter((u) => [u.pc, u.yrl, u.slip, u.note, u.worker].some((v) => String(v ?? '').toLowerCase().includes(q)));
-  const counts = { all: list.length, nosl: list.filter((u) => !u.slip).length };
+  const counts = { all: list.length, nosl: list.filter((u) => !u.slip).length, temp: list.filter((u) => isTempPc(u.pc, S.cfg)).length };
   for (const s of STATUSES) counts[s.key] = list.filter((u) => u.status === s.key).length;
   if (L.status === 'nosl') list = list.filter((u) => !u.slip);
+  else if (L.status === 'temp') list = list.filter((u) => isTempPc(u.pc, S.cfg));
   else if (L.status !== 'all') list = list.filter((u) => u.status === L.status);
   list.sort(L.sort === 'upd' ? (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0) : (a, b) => Number(a.pc) - Number(b.pc));
   return { list, counts };
@@ -699,7 +700,7 @@ function renderListBody() {
   $('#l-imp').innerHTML = `<option value="">取り込み：すべて</option>` + imps.map(([id, n]) => `<option value="${esc(id)}" ${L.imp === id ? 'selected' : ''}>取込 ${esc(id)}（${n}台）</option>`).join('');
   $('#l-pdate').value = L.pdate;
   $('#l-grid').textContent = L.select && L.selected.size ? `選択${L.selected.size}台を表で編集` : `表で編集（${list.length}台）`;
-  $('#l-status').innerHTML = [['all', 'すべて'], ...STATUSES.map((s) => [s.key, s.label]), ['nosl', '伝票なし']]
+  $('#l-status').innerHTML = [['all', 'すべて'], ...STATUSES.map((s) => [s.key, s.label]), ['nosl', '伝票なし'], ['temp', '仮番号']]
     .map(([k, l]) => `<button class="chip ${L.status === k ? 'on' : ''}" data-status="${k}">${l} <b>${counts[k] ?? 0}</b></button>`).join('');
   const body = $('#l-body');
   if (!Object.keys(S.units).length) {
@@ -713,7 +714,7 @@ function renderListBody() {
       const sel = L.selected.has(String(u.pc));
       return `<div class="unit ${sel ? 'sel' : ''} st-b-${u.status}" data-pc="${esc(u.pc)}">
         ${L.select ? `<span class="check">${sel ? '☑' : '☐'}</span>` : ''}
-        <div class="u-pc">${esc(u.pc)}</div>
+        <div class="u-pc">${esc(u.pc)}${isTempPc(u.pc, S.cfg) ? '<small class="temp-tag">仮</small>' : ''}</div>
         <div class="u-main">
           <div class="u-l1">${esc(u.yrl || '—')}</div>
           <div class="u-l2 ${u.slip ? '' : 'muted'}">${esc(u.slip || '伝票番号なし')}</div>
@@ -1105,7 +1106,7 @@ function openRegister(prefill = {}) {
     if (bySlip && Number(bySlip.pc) !== pc) info(`⚠ この伝票はPC${bySlip.pc}に登録済みです`, 'ng');
     else if (byY && pc != null && Number(byY.pc) !== pc) info(`⚠ このYRLはPC${byY.pc}に登録済みです`, 'ng');
     else if (cur) info(`PC${pc}は登録済み（${STATUS_LABEL[cur.status]}${cur.yrl ? '・YRLあり' : ''}${cur.slip ? '・伝票あり' : ''}）→ 空欄だけ追加します`);
-    else if (pc != null) info(`PC${pc}を新規登録します`);
+    else if (pc != null) info(isTempPc(pc, S.cfg) ? `仮番号${pc}で新規登録します（PC番号が分かったら変更）` : `PC${pc}を新規登録します`);
     else info(yrl || slip ? 'PC番号を入力してください' : 'YRLラベルと伝票を読み取ってください（順番は自由）');
   };
   const clear = () => {
@@ -1153,7 +1154,7 @@ function openRegister(prefill = {}) {
     cfg: S.cfg,
     panel: `
       <div class="reg">
-        <label>PC番号<span class="row"><input id="rg-pc" inputmode="numeric" autocomplete="off" placeholder="例 314"><button type="button" class="btn sm" id="rg-next">次の番号</button></span></label>
+        <label>PC番号<span class="row"><input id="rg-pc" inputmode="numeric" autocomplete="off" placeholder="例 314"><button type="button" class="btn sm" id="rg-next">次の番号</button><button type="button" class="btn sm" id="rg-temp">仮番号</button></span></label>
         <label>YRL番号<input id="rg-yrl" autocomplete="off" placeholder="スキャン（手入力も可）"></label>
         <label>発送伝票番号<input id="rg-slip" inputmode="numeric" autocomplete="off" placeholder="スキャン（なければ空欄）"></label>
         <div id="rg-info" class="rg-info"></div>
@@ -1176,10 +1177,15 @@ function openRegister(prefill = {}) {
       $r('rg-pc').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); tryAuto(); } });
       $r('rg-next').onclick = () => {
         // 前回登録した番号＋1。なければ登録済みの最大番号＋1
-        const maxPc = Math.max(Number(S.cfg.pcMin) - 1, ...Object.keys(S.units).map(Number).filter(Number.isFinite));
-        let n = (S.lastRegPc ?? maxPc) + 1;
+        const maxPc = Math.max(Number(S.cfg.pcMin) - 1, ...Object.keys(S.units).map(Number).filter((x) => Number.isFinite(x) && !isTempPc(x, S.cfg)));
+        let n = (S.lastRegPc != null && !isTempPc(S.lastRegPc, S.cfg) ? S.lastRegPc : maxPc) + 1;
         while (S.units[n]?.yrl && n <= Number(S.cfg.pcMax)) n++;
         $r('rg-pc').value = n;
+        refresh();
+        tryAuto();
+      };
+      $r('rg-temp').onclick = () => {
+        $r('rg-pc').value = nextTempPc(S.units, S.cfg) ?? '';
         refresh();
         tryAuto();
       };
@@ -1312,7 +1318,8 @@ function openShipRegister(slip, done) {
   const workers = allWorkers();
   openSheet(`
     <h3>伝票 ${esc(slip)} を登録</h3>
-    <label>PC番号<input id="sr-pc" inputmode="numeric" list="sr-list" autocomplete="off" placeholder="番号を入力 or 下から選ぶ"></label>
+    <label>PC番号<span class="row"><input id="sr-pc" inputmode="numeric" list="sr-list" autocomplete="off" placeholder="番号を入力 or 下から選ぶ"><button type="button" class="btn sm" id="sr-temp">仮番号</button></span></label>
+    <p class="muted small">PC番号が分からないときは「仮番号」（1, 2, 3…）で登録し、分かったら1台の編集の「PC番号を変更」で付け替えます。</p>
     <datalist id="sr-list">${free.map((u) => `<option value="${esc(u.pc)}">伝票なし・${esc(STATUS_LABEL[u.status])}${u.worker ? '・' + esc(u.worker) : ''}</option>`).join('')}${missing.slice(0, 300).map((n) => `<option value="${n}">未登録の番号</option>`).join('')}</datalist>
     ${free.length ? `<div class="lbl">伝票番号が未入力の台（発送前）</div><div class="chips static sr-chips">${free.slice(0, 40).map((u) => `<button type="button" class="chip" data-pick="${esc(u.pc)}">${esc(u.pc)}</button>`).join('')}${free.length > 40 ? `<span class="muted small">ほか${free.length - 40}台</span>` : ''}</div>` : ''}
     ${missing.length ? `<p class="muted small">未登録のPC番号：${missing.length}個（${esc(compactRanges(missing))}）</p>` : ''}
@@ -1329,12 +1336,13 @@ function openShipRegister(slip, done) {
       const u = pc != null ? S.units[pc] : null;
       const el = $('#sr-info');
       if (pc == null) { el.textContent = ''; return; }
-      if (!u) el.textContent = `PC${pc}を新規登録して、発送済みにします`;
+      if (!u) el.textContent = isTempPc(pc, S.cfg) ? `仮番号${pc}で登録して、発送済みにします（PC番号が分かったら変更）` : `PC${pc}を新規登録して、発送済みにします`;
       else if (u.slip && u.slip !== slip) el.textContent = `⚠ PC${pc}には別の伝票番号（${u.slip}）が入っています`;
       else el.textContent = `PC${pc}（${STATUS_LABEL[u.status]}${u.yrl ? '・YRL ' + u.yrl : ''}）にこの伝票番号を入れて発送済みにします`;
       if (u?.yrl && !$('#sr-yrl').value) $('#sr-yrl').placeholder = u.yrl;
     };
     $('#sr-pc').addEventListener('input', info);
+    $('#sr-temp').onclick = () => { $('#sr-pc').value = nextTempPc(S.units, S.cfg) ?? ''; info(); };
     sh.querySelectorAll('[data-pick]').forEach((b) => (b.onclick = () => { $('#sr-pc').value = b.dataset.pick; info(); }));
     $('#sr-cam').onclick = () => openScanner({
       title: 'YRL番号を読み取る', target: 'YRLラベル（01-0000000 のシール）', cfg: S.cfg,
@@ -1388,6 +1396,35 @@ function openSlipFilter() {
   });
 }
 
+function openRenumber(oldPc) {
+  const u = S.units[oldPc];
+  openSheet(`
+    <h3>PC${esc(oldPc)} の番号を変更</h3>
+    <p class="small">伝票 ${esc(u.slip || '—')}・YRL ${esc(u.yrl || '—')}・${esc(STATUS_LABEL[u.status])}</p>
+    <label>正しいPC番号<input id="rn-pc" inputmode="numeric" autocomplete="off"></label>
+    <div id="rn-info" class="rg-info-l small"></div>
+    <p class="muted small">変更先がすでに登録されている場合（YRLだけ入っている台など）は、空欄を補い合って1台にまとめます。番号が食い違う場合は変更しません。</p>
+    <div class="sheet-actions"><button class="btn" data-close>キャンセル</button><button class="btn primary" id="rn-go">変更する</button></div>`, (sh) => {
+    sh.querySelector('[data-close]').onclick = closeSheet;
+    const info = () => {
+      const r = planRenumber(oldPc, $('#rn-pc').value, S.units, { me: S.me });
+      const t = S.units[parsePc($('#rn-pc').value)];
+      $('#rn-info').textContent = !$('#rn-pc').value ? '' : !r.ok ? `⚠ ${r.msg}` : t ? `PC${t.pc}（${STATUS_LABEL[t.status]}${t.yrl ? '・YRL ' + t.yrl : ''}${t.slip ? '・伝票 ' + t.slip : ''}）にまとめます` : `PC${r.pc}に変更します`;
+    };
+    $('#rn-pc').addEventListener('input', info);
+    $('#rn-go').onclick = () => {
+      const r = planRenumber(oldPc, $('#rn-pc').value, S.units, { me: S.me });
+      if (!r.ok) return toast(r.msg, 'warn');
+      if (!confirm(`${r.msg.replace('しました', 'します')}。よろしいですか？`)) return;
+      S.store.setUnits(r.ups);
+      S.store.addLog(S.today, logEntries([{ pc: r.pc, msg: r.msg }]));
+      closeSheet();
+      toast(r.msg);
+      setTimeout(() => openUnit(r.pc), 300);
+    };
+  });
+}
+
 // ================= 1台の編集 =================
 function openUnit(pc) {
   const isNew = pc == null || !S.units[pc];
@@ -1395,7 +1432,9 @@ function openUnit(pc) {
   const workers = allWorkers();
   if (u.worker && !workers.includes(u.worker)) workers.push(u.worker);
   openSheet(`
-    <h3>${isNew ? (pc != null ? `PC${esc(pc)}（未登録）を追加` : 'PCを追加') : `PC ${esc(u.pc)}`}</h3>
+    <h3 class="u-head">${isNew ? (pc != null ? `PC${esc(pc)}（未登録）を追加` : 'PCを追加') : `PC ${esc(u.pc)}${isTempPc(u.pc, S.cfg) ? ' <span class="badge temp">仮番号</span>' : ''}`}
+      ${!isNew ? '<button type="button" class="btn sm" id="u-renum">PC番号を変更</button>' : ''}</h3>
+    ${!isNew && isTempPc(u.pc, S.cfg) ? '<p class="muted small">PC番号が分からない台の仮番号です。正しいPC番号が分かったら「PC番号を変更」で付け替えてください。</p>' : ''}
     ${isNew ? `<label>PC番号<input id="u-pc" inputmode="numeric" value="${esc(u.pc)}"></label>` : ''}
     <label>YRL番号<span class="row"><input id="u-yrl" value="${esc(u.yrl)}" placeholder="01-0000000" autocomplete="off"><button type="button" class="btn cam" data-scan="yrl">📷</button></span></label>
     <label>発送伝票番号<span class="row"><input id="u-slip" value="${esc(u.slip)}" inputmode="numeric" placeholder="0000-0000-0000" autocomplete="off"><button type="button" class="btn cam" data-scan="slip">📷</button></span></label>
@@ -1438,7 +1477,8 @@ function openUnit(pc) {
       if (isNew) {
         const p = parsePc($('#u-pc').value);
         if (p != null && S.units[p]) w.push(`PC${p}は既に登録されています（保存すると上書き）`);
-        if (p != null && (p < S.cfg.pcMin || p > S.cfg.pcMax)) w.push(`PC番号が範囲外です（${S.cfg.pcMin}〜${S.cfg.pcMax}）`);
+        if (p != null && p > S.cfg.pcMax) w.push(`PC番号が範囲外です（${S.cfg.pcMin}〜${S.cfg.pcMax}）`);
+        else if (p != null && isTempPc(p, S.cfg)) w.push(`${p}は仮番号（PC番号不明）として登録されます`);
       }
       const box = $('#u-warn');
       box.innerHTML = w.map((x) => `<div>⚠ ${esc(x)}</div>`).join('');
@@ -1488,6 +1528,7 @@ function openUnit(pc) {
       closeSheet();
       toast(`PC${p}を保存しました`);
     };
+    $('#u-renum')?.addEventListener('click', () => openRenumber(u.pc));
     $('#u-del')?.addEventListener('click', () => {
       if (!confirm(`PC${u.pc}を削除しますか？（元に戻せません）`)) return;
       S.store.setUnits({ [u.pc]: null });

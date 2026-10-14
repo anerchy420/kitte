@@ -357,7 +357,8 @@ export function planImport(records, units, cfg, opts) {
   for (const rec of records) {
     const item = { rec, pc: rec.pc, warnings: [], changes: {} };
     if (rec.pc == null) { item.action = 'error'; item.warnings.push('PC番号が読み取れません'); out.push(item); continue; }
-    if (rec.pc < cfg.pcMin || rec.pc > cfg.pcMax) item.warnings.push(`PC番号が範囲外(${cfg.pcMin}〜${cfg.pcMax})`);
+    if (rec.pc > cfg.pcMax) item.warnings.push(`PC番号が範囲外(${cfg.pcMin}〜${cfg.pcMax})`);
+    else if (rec.pc < cfg.pcMin) item.warnings.push('仮番号（PC番号不明）として登録');
     if (rec.yrl && !YRL_RE.test(rec.yrl)) item.warnings.push('YRL番号の形式が違います');
     if (rec.slip && !SLIP_RE.test(rec.slip)) item.warnings.push('伝票番号の形式が違います');
     if (seen.has(rec.pc)) { seen.get(rec.pc).action = 'dup'; seen.get(rec.pc).warnings.push('同じPC番号が後にもあり、後の行を採用'); }
@@ -871,4 +872,47 @@ export function compactRanges(nums) {
     i = j;
   }
   return r.join(', ');
+}
+
+// ---------- 仮番号（PC番号が分からない台） ----------
+// 範囲の最小値（例 160）より小さい番号を「仮番号」とする
+export const isTempPc = (pc, cfg = DEFAULT_CONFIG) => Number.isFinite(Number(pc)) && Number(pc) >= 1 && Number(pc) < Number(cfg.pcMin);
+export function nextTempPc(units, cfg = DEFAULT_CONFIG) {
+  let n = 1;
+  const used = new Set(Object.keys(units).map(Number));
+  const maxTemp = Math.max(0, ...[...used].filter((x) => isTempPc(x, cfg)));
+  n = maxTemp + 1;
+  while (used.has(n)) n++;
+  return n < Number(cfg.pcMin) ? n : null;
+}
+
+const STATUS_RANK = { todo: 0, wip: 1, hold: 1, packed: 2, shipped: 3 };
+const STATUS_FIELDS = ['status', 'packedDate', 'packedAt', 'shippedAt', 'shippedDate'];
+// PC番号の付け替え。変更先が登録済みなら、空欄を補い合って1台にまとめる（値が食い違えば中止）
+export function planRenumber(oldPc, newPc, units, { me = '', now = Date.now() } = {}) {
+  const from = units[oldPc];
+  const n = parsePc(newPc);
+  if (!from) return { ok: false, msg: `PC${oldPc}が見つかりません` };
+  if (n == null) return { ok: false, msg: '新しいPC番号を入力してください' };
+  if (n === Number(oldPc)) return { ok: false, msg: '同じ番号です' };
+  const to = units[n];
+  const note = (a, b) => [a, b].filter(Boolean).join(' / ');
+  let merged;
+  if (!to) {
+    merged = { ...from, pc: n };
+  } else {
+    for (const k of ['yrl', 'slip', 'worker']) {
+      if (from[k] && to[k] && from[k] !== to[k]) return { ok: false, msg: `PC${n}と${{ yrl: 'YRL番号', slip: '伝票番号', worker: '作業者' }[k]}が違います（${to[k]} / ${from[k]}）。確認してください` };
+    }
+    merged = { ...to };
+    for (const k of ['yrl', 'slip', 'worker', 'importId']) if (!merged[k] && from[k]) merged[k] = from[k];
+    merged.note = note(to.note, from.note);
+    // 進んでいる方のステータス（と日付）を採用
+    if ((STATUS_RANK[from.status] ?? 0) > (STATUS_RANK[to.status] ?? 0)) for (const k of STATUS_FIELDS) merged[k] = from[k] ?? null;
+    merged.createdAt = Math.min(to.createdAt || now, from.createdAt || now);
+  }
+  merged.note = note(merged.note, `PC${oldPc}から変更`);
+  merged.updatedAt = now;
+  merged.updatedBy = me;
+  return { ok: true, merged: !!to, pc: n, ups: { [oldPc]: null, [n]: merged }, msg: to ? `PC${oldPc}をPC${n}にまとめました` : `PC${oldPc}をPC${n}に変更しました` };
 }

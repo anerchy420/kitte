@@ -395,3 +395,31 @@ test('未登録のPC番号・範囲の短縮表記・未登録で発送した伝
   const r2 = planRegister({ pc: 164, slip: '3912-1418-8337' }, units, { status: 'shipped', date: '2026-10-12', me: '根本' });
   assert.deepEqual([r2.isNew, r2.ups[164].status, r2.ups[164].packedDate, r2.ups[164].shippedDate], [true, 'shipped', '2026-10-12', '2026-10-12']);
 });
+
+test('仮番号と、PC番号の付け替え（まとめる）', async () => {
+  const { isTempPc, nextTempPc, planRenumber } = await import('../js/logic.js');
+  const cfg = { ...DEFAULT_CONFIG, pcMin: 160, pcMax: 660 };
+  assert.equal(isTempPc(1, cfg), true);
+  assert.equal(isTempPc(160, cfg), false);
+  const units = {
+    1: { pc: 1, slip: '3912-1418-9001', status: 'shipped', packedDate: '2026-10-09', shippedDate: '2026-10-10', worker: '福山' },
+    2: { pc: 2, slip: '3912-1418-9002', status: 'shipped', shippedDate: '2026-10-10' },
+    300: { pc: 300, yrl: '01-0000300', slip: '', status: 'todo', note: '元' },
+    301: { pc: 301, yrl: '01-0000301', slip: '3912-0000-0000', status: 'packed' },
+  };
+  assert.equal(nextTempPc(units, cfg), 3);
+  assert.equal(nextTempPc({}, cfg), 1);
+  // 空き番号へ変更
+  let r = planRenumber(2, 400, units, { me: 'x', now: 5 });
+  assert.equal(r.ups[2], null);
+  assert.equal(r.ups[400].slip, '3912-1418-9002');
+  assert.equal(r.ups[400].pc, 400);
+  // 登録済み（YRLのみ）へまとめる
+  r = planRenumber(1, 300, units, { me: 'x', now: 5 });
+  assert.equal(r.merged, true);
+  const m = r.ups[300];
+  assert.deepEqual([m.yrl, m.slip, m.status, m.shippedDate, m.packedDate, m.worker], ['01-0000300', '3912-1418-9001', 'shipped', '2026-10-10', '2026-10-09', '福山']);
+  assert.equal(m.note, '元 / PC1から変更');
+  // 伝票番号が食い違う → 中止
+  assert.equal(planRenumber(1, 301, units).ok, false);
+});
