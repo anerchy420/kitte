@@ -4,13 +4,13 @@ import {
   textToTable, guessMapping, looksLikeHeader, rowsToRecords, planImport, buildImportUpdates,
   weekdayLabel, parsePlanText, normalizePlan, progressTable, planSummary, planCarry, dayBase,
   buildRestoreUpdates,
-  parseScan, SCAN_KIND_LABEL, planRegister, extractSlips, reconcileShipped, missingPcNumbers, compactRanges, isTempPc, nextTempPc, planRenumber,
+  parseScan, SCAN_KIND_LABEL, planRegister, extractSlips, reconcileShipped, missingPcNumbers, compactRanges, isTempPc, nextTempPc, planRenumber, numberBalance,
   statusSideEffects, buildEditUpdates, formatReport, matchNumbers, shippedOn, shipDateOf, EXPORT_COLUMNS, DEFAULT_EXPORT, filterForExport, exportTable, exportColumns, splitForExport, toCSV, dailySummary,
 } from './logic.js';
 import { createStore, teamIdFromPasscode, isDemo } from './store.js';
 import { openScanner } from './scanner.js';
 
-const APP_VERSION = '2026-10-14c';
+const APP_VERSION = '2026-10-14d';
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = {
@@ -703,13 +703,14 @@ function renderListBody() {
   $('#l-status').innerHTML = [['all', 'すべて'], ...STATUSES.map((s) => [s.key, s.label]), ['nosl', '伝票なし'], ['temp', '仮番号']]
     .map(([k, l]) => `<button class="chip ${L.status === k ? 'on' : ''}" data-status="${k}">${l} <b>${counts[k] ?? 0}</b></button>`).join('');
   const body = $('#l-body');
+  const balHtml = L.status === 'temp' ? balanceLine() : '';
   if (!Object.keys(S.units).length) {
     body.innerHTML = `<div class="card empty"><p>まだPCが登録されていません。</p><p class="muted small">「入出力」タブからExcelや文字列で一括登録するか、右上の＋で1台ずつ追加できます。</p></div>`;
   } else if (!list.length) {
-    body.innerHTML = `<p class="muted center">該当なし</p>`;
+    body.innerHTML = balHtml + `<p class="muted center">該当なし</p>`;
   } else {
     const shown = list.slice(0, L.limit);
-    body.innerHTML = shown.map((u) => {
+    body.innerHTML = balHtml + shown.map((u) => {
       const nx = NEXT[u.status];
       const sel = L.selected.has(String(u.pc));
       return `<div class="unit ${sel ? 'sel' : ''} st-b-${u.status}" data-pc="${esc(u.pc)}">
@@ -1234,6 +1235,7 @@ function renderReconcile() {
   if (res) {
     body = `
       <p class="small">レシート等の伝票番号 <b>${res.unique}</b>件${res.dupCount ? `（重複${res.dupCount}件を除く）` : ''} ／ アプリで発送済み <b>${Object.values(S.units).filter((u) => u.status === 'shipped').length}</b>台</p>
+      ${balanceLine()}
       <details class="rc-sec bad" ${res.unknown.length ? 'open' : ''} data-sec="unknown">
         <summary><b>⚠ 登録しないまま発送（リストにあるがアプリにない）</b> <span class="chip ${res.unknown.length ? 'a-error' : ''}">${res.unknown.length}</span></summary>
         <p class="muted small">アプリに登録されていない伝票番号です。「登録する」でPC番号を選ぶと、この伝票番号を入れて発送済みにします。アプリ側に1桁違いの伝票番号がある場合は、入力ミスとして直せます。</p>
@@ -1401,7 +1403,9 @@ function openRenumber(oldPc) {
   openSheet(`
     <h3>PC${esc(oldPc)} の番号を変更</h3>
     <p class="small">伝票 ${esc(u.slip || '—')}・YRL ${esc(u.yrl || '—')}・${esc(STATUS_LABEL[u.status])}</p>
-    <label>正しいPC番号<input id="rn-pc" inputmode="numeric" autocomplete="off"></label>
+    <label>正しいPC番号<input id="rn-pc" inputmode="numeric" autocomplete="off" list="rn-list"></label>
+    <datalist id="rn-list">${missingPcNumbers(S.units, S.cfg).map((n) => `<option value="${n}">未登録の番号</option>`).join('')}</datalist>
+    ${balanceLine()}
     <div id="rn-info" class="rg-info-l small"></div>
     <p class="muted small">変更先がすでに登録されている場合（YRLだけ入っている台など）は、空欄を補い合って1台にまとめます。番号が食い違う場合は変更しません。</p>
     <div class="sheet-actions"><button class="btn" data-close>キャンセル</button><button class="btn primary" id="rn-go">変更する</button></div>`, (sh) => {
@@ -1959,6 +1963,14 @@ async function exportXLSX() {
   }
 }
 
+// 仮番号と未登録番号の突き合わせ（1行）
+function balanceLine() {
+  const b = numberBalance(S.units, S.cfg);
+  if (!b.temps.length && !b.missing.length) return '';
+  return `<div class="bal ${b.ok ? 'ok' : 'ng'}">${b.ok ? '✅' : '⚠'} 仮番号 <b>${b.temps.length}</b>台 ／ ${S.cfg.pcMin}〜${S.cfg.pcMax}の未登録 <b>${b.missing.length}</b>個
+    ${b.ok ? '→ 一致' : `→ ${b.diff > 0 ? `仮番号が${b.diff}台多い` : `仮番号が${-b.diff}台足りない`}`}</div>`;
+}
+
 // ================= 進捗 =================
 async function loadHistory() {
   $('#tab-history').innerHTML = '<div class="card"><p class="muted">読み込み中…</p></div>';
@@ -2020,6 +2032,8 @@ function renderHistory() {
       ${!plan.length ? `<p class="muted small">「計画を編集」で日別の目標（当日目標・目標累計）を入れると、計画との差がわかります。</p>` : ''}
     </div>
 
+    ${numberCard()}
+
     ${ps.rows.length ? `<div class="card">
       <div class="card-h"><h2>累計の推移</h2></div>
       <div id="burn" class="burn"></div>
@@ -2033,6 +2047,7 @@ function renderHistory() {
     </div>`;
 
   $('#h-reload').onclick = loadHistory;
+  $('#tab-history').querySelectorAll('[data-open-pc]').forEach((tr) => (tr.onclick = () => openUnit(tr.dataset.openPc)));
   $('#h-plan').onclick = openPlanEditor;
   $('#tab-history').querySelector('tbody')?.addEventListener('click', (e) => {
     const tr = e.target.closest('[data-day]');
@@ -2097,6 +2112,20 @@ function drawBurn(box, ps) {
   svg.addEventListener('pointermove', show);
   svg.addEventListener('pointerdown', show);
   svg.addEventListener('pointerleave', hide);
+}
+
+function numberCard() {
+  const b = numberBalance(S.units, S.cfg);
+  if (!b.temps.length && !b.missing.length) return '';
+  return `<div class="card">
+    <div class="card-h"><h2>PC番号の確認</h2></div>
+    ${balanceLine()}
+    <p class="muted small">PC番号が分からない台（仮番号）の数と、${S.cfg.pcMin}〜${S.cfg.pcMax}で抜けている番号の数が同じなら、全台そろっています。</p>
+    <details><summary>未登録の番号 ${b.missing.length}個</summary><p class="small mono">${esc(compactRanges(b.missing)) || 'なし'}</p></details>
+    <details><summary>仮番号の台 ${b.temps.length}台</summary>
+      <div class="table-wrap"><table class="plan">${b.temps.map((u) => `<tr data-open-pc="${esc(u.pc)}"><td><b>仮${esc(u.pc)}</b></td><td>${esc(u.slip || '—')}</td><td>${esc(u.yrl || '—')}</td><td>${statusBadge(u.status)}</td></tr>`).join('')}</table></div>
+    </details>
+  </div>`;
 }
 
 function openDaySheet(date, days) {

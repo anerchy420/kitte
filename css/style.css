@@ -395,3 +395,8 @@ label > .row input { margin: 0; }
 .badge.temp, .temp-tag { color: #8a5a00; background: #fff1c7; }
 .temp-tag { display: block; font-size: 11px; font-weight: 700; border-radius: 6px; text-align: center; padding: 0 4px; }
 .u-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.bal { border-radius: 10px; padding: 8px 10px; margin: 6px 0 8px; font-size: 14px; }
+.bal.ok { background: color-mix(in srgb, var(--ok) 13%, transparent); color: var(--ok); }
+.bal.ng { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
+.bal b { font-size: 16px; }
+.mono { font-variant-numeric: tabular-nums; word-break: break-all; }

@@ -423,3 +423,15 @@ test('仮番号と、PC番号の付け替え（まとめる）', async () => {
   // 伝票番号が食い違う → 中止
   assert.equal(planRenumber(1, 301, units).ok, false);
 });
+
+test('仮番号の数と未登録番号の数の突き合わせ', async () => {
+  const { numberBalance } = await import('../js/logic.js');
+  const cfg = { ...DEFAULT_CONFIG, pcMin: 160, pcMax: 165 };
+  const units = { 160: { pc: 160 }, 162: { pc: 162 }, 163: { pc: 163 }, 165: { pc: 165 }, 1: { pc: 1 }, 2: { pc: 2 } };
+  let b = numberBalance(units, cfg);
+  assert.deepEqual(b.missing, [161, 164]);
+  assert.equal(b.temps.length, 2);
+  assert.equal(b.ok, true);
+  b = numberBalance({ ...units, 3: { pc: 3 } }, cfg);
+  assert.deepEqual([b.ok, b.diff], [false, 1]);
+});

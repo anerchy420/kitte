@@ -916,3 +916,10 @@ export function planRenumber(oldPc, newPc, units, { me = '', now = Date.now() } 
   merged.updatedBy = me;
   return { ok: true, merged: !!to, pc: n, ups: { [oldPc]: null, [n]: merged }, msg: to ? `PC${oldPc}をPC${n}にまとめました` : `PC${oldPc}をPC${n}に変更しました` };
 }
+
+// 仮番号の台数と、範囲内の未登録番号の数を突き合わせる（一致すれば全台そろっている）
+export function numberBalance(units, cfg = DEFAULT_CONFIG) {
+  const temps = Object.values(units).filter((u) => isTempPc(u.pc, cfg)).sort((a, b) => a.pc - b.pc);
+  const missing = missingPcNumbers(units, cfg);
+  return { temps, missing, diff: temps.length - missing.length, ok: temps.length === missing.length };
+}
